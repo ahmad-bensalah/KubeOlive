@@ -1,0 +1,10 @@
+---
+# Quick connectivity check — runs ansible ping against all hosts.
+# Use this to verify Semaphore can reach all VMs before running the full stack.
+- name: Ping all hosts
+  hosts: all
+  gather_facts: false
+  tags: test
+  tasks:
+    - name: Ping
+      ansible.builtin.ping:

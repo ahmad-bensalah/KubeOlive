@@ -1,0 +1,140 @@
+---
+# ============================================================
+# LONGHORN ROLE — cloud-native distributed block storage
+# ============================================================
+
+# ---- install open-iscsi on ALL nodes -----------------------
+- name: Install open-iscsi, tgt (iSCSI target daemon), and util-linux
+  tags: [longhorn]
+  ansible.builtin.apt:
+    name:
+      - open-iscsi
+      - util-linux
+      - nfs-common
+      - tgt               # iSCSI target daemon required by Longhorn for RWX volumes
+    state: present
+    update_cache: true
+
+- name: Enable and start iscsid
+  tags: [longhorn]
+  ansible.builtin.systemd:
+    name: iscsid
+    enabled: true
+    state: started
+
+# tgt must be running before Longhorn manager starts — without it, Longhorn
+# cannot provision iSCSI-backed volumes and longhorn-manager pods crashloop.
+# Longhorn's instance-manager pods start/stop tgtd themselves, per node,
+# per volume attach — they must NOT compete with a host-level systemd tgt
+# service for the socket. Install the package (needed so the tgt binary
+# exists on the host), but keep the systemd unit stopped and masked.
+- name: Ensure tgt system service is stopped and masked (Longhorn manages tgtd itself)
+  tags: [longhorn]
+  ansible.builtin.systemd:
+    name: tgt
+    enabled: false
+    state: stopped
+    masked: true
+
+# ---- install Longhorn via Helm (runs on master) -------------
+- name: Install Helm if not present
+  tags: [longhorn]
+  ansible.builtin.shell: |
+    curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  args:
+    creates: /usr/local/bin/helm
+  when: inventory_hostname in groups['master']
+
+- name: Add Longhorn Helm repo
+  tags: [longhorn]
+  ansible.builtin.command: helm repo add longhorn https://charts.longhorn.io
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: false
+  when: inventory_hostname in groups['master']
+
+- name: Update Helm repos
+  tags: [longhorn]
+  ansible.builtin.command: helm repo update
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: false
+  when: inventory_hostname in groups['master']
+
+- name: Create longhorn-system namespace
+  tags: [longhorn]
+  ansible.builtin.command: kubectl create namespace longhorn-system
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: ns_result
+  changed_when: ns_result.rc == 0
+  failed_when: ns_result.rc != 0 and 'already exists' not in ns_result.stderr
+  when: inventory_hostname in groups['master']
+
+- name: Deploy Longhorn via Helm
+  tags: [longhorn]
+  ansible.builtin.command: >
+    helm upgrade --install longhorn longhorn/longhorn
+    --namespace longhorn-system
+    --set defaultSettings.defaultReplicaCount=2
+    --set defaultSettings.storageMinimalAvailablePercentage=10
+    --set defaultSettings.defaultDataPath=/var/lib/longhorn
+    --set persistence.defaultClassReplicaCount=2
+    --set service.ui.type=NodePort
+    --set service.ui.nodePort=30080
+    --set csi.kubeletRootDir="/var/snap/microk8s/common/var/lib/kubelet"
+    --timeout 10m
+    --wait
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: false
+  when: inventory_hostname in groups['master']
+
+
+# ---- make Longhorn the default StorageClass ----------------
+- name: Remove default annotation from any existing StorageClass
+  tags: [longhorn]
+  ansible.builtin.shell: |
+    kubectl get sc -o name | xargs -I{} kubectl annotate {} \
+      storageclass.kubernetes.io/is-default-class=false --overwrite
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: false
+  failed_when: false
+  when: inventory_hostname in groups['master']
+
+- name: Set Longhorn as default StorageClass
+  tags: [longhorn]
+  ansible.builtin.command: >
+    kubectl patch storageclass longhorn
+    -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}, "allowVolumeExpansion": true}'
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: false
+  when: inventory_hostname in groups['master']
+
+# ---- verify deployment -------------------------------------
+- name: Wait for Longhorn manager pods to be Running
+  tags: [longhorn]
+  ansible.builtin.command: >
+    kubectl rollout status daemonset/longhorn-manager
+    -n longhorn-system --timeout=5m
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: false
+  when: inventory_hostname in groups['master']
+
+- name: Print Longhorn UI access info
+  tags: [longhorn]
+  ansible.builtin.debug:
+    msg:
+      - "================================================="
+      - "Longhorn UI : http://{{ hostvars[groups['worker'][0]]['ansible_host'] }}:30080"
+      - "Default StorageClass : longhorn (replica=2)"
+      - "Data path : /var/lib/longhorn on each node"
+      - "================================================="
+      - "When you add more workers, run:"
+      - "  helm upgrade longhorn longhorn/longhorn -n longhorn-system"
+      - "  --set defaultSettings.defaultReplicaCount=2"
+      - "================================================="
+  when: inventory_hostname in groups['master']

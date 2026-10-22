@@ -1,0 +1,39 @@
+---
+# ==============================================================================
+# Generate inventory.ini from group_vars/all.yml + inventory.j2
+# ==============================================================================
+# Usage:
+#   ansible-playbook generate_inventory.yml
+#   ./generate-inventory.sh          (convenience wrapper)
+#
+# This playbook runs entirely on localhost — it reads the variables from
+# group_vars/all.yml and renders inventory.j2 into inventory.ini.
+# No SSH connection to any remote host is required.
+# ==============================================================================
+
+- name: Generate inventory.ini from all.yml
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+
+  # Load all.yml explicitly so this playbook works even before inventory.ini
+  # exists (i.e., on first run or after a clean checkout).
+  vars_files:
+    - group_vars/all.yml
+
+  tasks:
+    - name: Render inventory.j2 → inventory.ini
+      ansible.builtin.template:
+        src: inventory.j2
+        dest: inventory.ini
+        mode: "0644"
+
+    - name: Show generated inventory
+      ansible.builtin.command: cat inventory.ini
+      register: inv_content
+      changed_when: false
+
+    - name: Print inventory
+      ansible.builtin.debug:
+        msg: "{{ inv_content.stdout_lines }}"

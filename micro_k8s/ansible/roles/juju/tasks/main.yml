@@ -1,0 +1,709 @@
+---
+# ==============================================================================
+# JUJU ROLE — Installs Juju, Configures Routing, and Deploys Charmed Kubeflow
+# ==============================================================================
+# Juju is an application modeling tool that manages "charms" (packaged Kubernetes
+# operators). We use Juju to deploy, integrate, and configure the entire Charmed
+# Kubeflow bundle on top of MicroK8s.
+#
+# This role runs on the dedicated Juju VM (10.110.188.147). Its responsibilities:
+#   1. Install LXD + Juju snaps
+#   2. Bootstrap a Juju controller inside an LXD container
+#   3. Solve the cross-network routing problem (K8s nodes ↔ LXD container)
+#   4. Register the MicroK8s cluster as a Juju cloud
+#   5. Deploy the Charmed Kubeflow bundle
+#   6. Configure Dex OIDC with GitLab as the identity provider
+
+# ---- Prerequisites -----------------------------------------------------------
+# Install 'jq' — a lightweight command-line JSON processor.
+# We use jq to parse the JSON output of 'juju status --format=json' to determine
+# whether applications like dex-auth are active before attempting to configure them.
+# Without jq, we would need fragile regex parsing of plain-text Juju output.
+- name: Install jq (used for JSON parsing)
+  ansible.builtin.apt:
+    name: jq
+    state: present
+    update_cache: true
+
+# ---- Install LXD & Juju -----------------------------------------------------
+# LXD is a system container manager. Juju uses LXD as the "backing cloud" to
+# host the Juju controller daemon inside a lightweight Linux container.
+# We use the snap package manager because LXD and Juju are distributed as snaps
+# on Ubuntu — this guarantees we get the upstream-supported versions.
+- name: Install LXD via snap
+  community.general.snap:
+    name: lxd
+    channel: latest/stable
+    state: present
+
+# Juju 3.6/stable is the version compatible with Charmed Kubeflow 1.10.
+# The 'classic' confinement is required because Juju needs full access to the
+# host filesystem and network sockets (LXD socket, kubeconfig, SSH keys).
+# Without classic confinement, Juju would be sandboxed and unable to bootstrap.
+- name: Install Juju via snap
+  community.general.snap:
+    name: juju
+    channel: "3.6/stable"
+    classic: true
+    state: present
+
+# ---- Initialize LXD ---------------------------------------------------------
+# Initializes LXD with safe defaults: creates the default storage pool and the
+# 'lxdbr0' network bridge. The bridge gets a private subnet (e.g. 10.177.205.0/24)
+# which is ONLY visible inside the Juju VM — this is what causes the routing
+# problem we fix later (see "Configure Routing" section below).
+- name: Initialize LXD
+  ansible.builtin.command: lxd init --auto
+  changed_when: false
+
+# Juju communicates with LXD over a Unix socket at
+# /var/snap/lxd/common/lxd/unix.socket. Only members of the 'lxd' group can
+# access this socket. Adding 'ubuntu' to the group allows running Juju commands
+# without sudo, which is important because Juju stores its configs under the
+# user's home directory (~/.local/share/juju/).
+- name: Add {{ vm_user }} to lxd group
+  ansible.builtin.user:
+    name: "{{ vm_user }}"
+    groups: lxd
+    append: true
+
+# ---- Configure Juju and kube directories -------------------------------------
+- name: Ensure Juju config directories exist for {{ vm_user }}
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ vm_user }}"
+    group: "{{ vm_user }}"
+    mode: "0755"
+  loop:
+    - /home/{{ vm_user }}/.local
+    - /home/{{ vm_user }}/.local/share
+    - /home/{{ vm_user }}/.local/share/juju
+    - /home/{{ vm_user }}/.config
+    - /home/{{ vm_user }}/.config/juju
+    - /home/{{ vm_user }}/.kube
+
+- name: Copy kubeconfig to Juju controller machine
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/configs/config"
+    dest: /home/{{ vm_user }}/.kube/config
+    owner: "{{ vm_user }}"
+    group: "{{ vm_user }}"
+    mode: "0600"
+
+# ---- Bootstrap Juju Controller -----------------------------------------------
+- name: Check if Juju controller is already bootstrapped
+  ansible.builtin.command: sudo -u {{ vm_user }} -i juju show-controller lxd-controller
+  register: controller_check
+  failed_when: false
+  changed_when: false
+
+- name: Bootstrap Juju controller on LXD
+  ansible.builtin.command: sudo -u {{ vm_user }} -i juju bootstrap localhost lxd-controller
+  when: controller_check.rc != 0
+
+# ==============================================================================
+# CRITICAL NETWORKING SECTION — Cross-Network Routing
+# ==============================================================================
+# PROBLEM: After bootstrap, the Juju controller runs at a private IP like
+#   10.177.205.126 on the lxdbr0 bridge inside the Juju VM. But the Kubernetes
+#   pods on nodes 10.110.188.144/145/146 have NO route to 10.177.205.0/24.
+#   Every charm's init container tries to reach 10.177.205.126:17070 and fails
+#   with: "dial tcp 10.177.205.126:17070: connect: no route to host"
+#
+# SOLUTION (3 steps):
+#   1. Enable IP forwarding on the Juju VM so it can act as a router
+#   2. Allow forwarded packets through iptables (FORWARD chain)
+#   3. Add static routes on all K8s nodes pointing 10.177.205.0/24 → Juju VM
+#
+# Network diagram BEFORE fix:
+#   [K8s Node .144] --X--> 10.177.205.126:17070  (NO ROUTE)
+#
+# Network diagram AFTER fix:
+#   [K8s Node .144] --> route via .147 --> [Juju VM .147] --> lxdbr0 --> [LXD .126]
+
+# Step 1: Dynamically detect the LXD bridge subnet so we don't hardcode it.
+# The subnet could be 10.177.205.0/24 or any other range assigned by LXD.
+- name: Get LXD bridge subnet CIDR
+  ansible.builtin.shell: |
+    ip route show dev lxdbr0 | grep -v default | awk '{print $1}'
+  register: lxd_subnet
+  changed_when: false
+
+# Step 2: Enable IP forwarding in the Linux kernel. By default, Linux drops
+# packets that are not addressed to itself. With ip_forward=1, the kernel
+# will forward packets from eth0 → lxdbr0 and back, acting as a router.
+- name: Enable IP forwarding on Juju controller VM
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: '1'
+    sysctl_set: true
+    state: present
+    reload: true
+
+# Step 3a: Even with IP forwarding enabled, iptables may DROP forwarded packets
+# if the FORWARD chain default policy is DROP (which is common). These two rules
+# explicitly ACCEPT all packets flowing in/out of the lxdbr0 interface.
+- name: Allow forwarded traffic on Juju controller VM for LXD bridge
+  ansible.builtin.iptables:
+    chain: FORWARD
+    action: insert
+    rule_num: 1
+    in_interface: lxdbr0
+    jump: ACCEPT
+
+- name: Allow forwarded traffic on Juju controller VM to LXD bridge
+  ansible.builtin.iptables:
+    chain: FORWARD
+    action: insert
+    rule_num: 2
+    out_interface: lxdbr0
+    jump: ACCEPT
+
+# Step 3b: Tell every Kubernetes node: "To reach 10.177.205.0/24, send packets
+# to 10.110.188.147 (the Juju VM)." We create a systemd oneshot service so the
+# route survives reboots. We use 'delegate_to' to run this on K8s nodes, not
+# the Juju VM where this role is executing.
+- name: Configure persistent static route to Juju LXD subnet on all Kubernetes nodes
+  delegate_to: "{{ item }}"
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/juju-route.service
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Static Route for Juju Controller LXD
+      After=network.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/sbin/ip route replace {{ lxd_subnet.stdout }} via {{ hostvars[groups['juju_machine'][0]]['ansible_host'] }}
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
+  loop: "{{ groups['k8s'] }}"
+
+# Enable and start the route service immediately on all K8s nodes.
+- name: Enable and start persistent static route on Kubernetes nodes
+  delegate_to: "{{ item }}"
+  become: true
+  ansible.builtin.systemd:
+    name: juju-route
+    daemon_reload: true
+    enabled: true
+    state: restarted
+  loop: "{{ groups['k8s'] }}"
+
+# ---- Register MicroK8s Cloud in Juju -----------------------------------------
+# Idempotency: check if 'kubeflow-cloud' is already registered before attempting
+# to add it. The 'failed_when' condition ignores "already exists" errors that
+# occur during re-runs, making the playbook safe to execute multiple times.
+- name: Check if kubeflow-cloud is already registered
+  ansible.builtin.command: sudo -u {{ vm_user }} -i juju show-cloud kubeflow-cloud
+  register: cloud_check
+  failed_when: false
+  changed_when: false
+
+# Register the MicroK8s cluster as a Kubernetes cloud in Juju. The
+# '--storage=longhorn' flag sets Longhorn as the default StorageClass,
+# which is required for Kubeflow's PersistentVolumeClaims (MySQL, MinIO, etc.).
+- name: Register MicroK8s cluster as kubeflow-cloud
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju add-k8s kubeflow-cloud
+    --controller lxd-controller
+    --storage=longhorn
+  register: reg_cloud
+  failed_when:
+    - reg_cloud.rc != 0
+    - "'already exists' not in reg_cloud.stderr"
+  when: cloud_check.rc != 0
+
+- name: Check if kubeflow model already exists
+  ansible.builtin.command: sudo -u {{ vm_user }} -i juju show-model kubeflow-cloud/kubeflow
+  register: model_check
+  failed_when: false
+  changed_when: false
+
+- name: Add kubeflow model
+  ansible.builtin.command: sudo -u {{ vm_user }} -i juju add-model kubeflow kubeflow-cloud
+  register: reg_model
+  failed_when:
+    - reg_model.rc != 0
+    - "'already exists' not in reg_model.stderr"
+  when: model_check.rc != 0
+
+- name: Check if Kubeflow is already deployed in model
+  ansible.builtin.shell: >
+    sudo -u {{ vm_user }} -i juju status -m kubeflow --format=json | jq '.applications | length'
+  register: apps_check
+  failed_when: false
+  changed_when: false
+
+- name: Deploy Charmed Kubeflow bundle (1.10/stable)
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju deploy kubeflow --trust --channel=1.10/stable -m kubeflow
+  when: apps_check.rc != 0 or apps_check.stdout == '0'
+
+- name: Wait for dex-auth application to become active
+  ansible.builtin.shell: >
+    sudo -u {{ vm_user }} -i juju status -m kubeflow --format=json
+    | jq -r '.applications["dex-auth"]["application-status"].current'
+  register: dex_status
+  until: dex_status.stdout == 'active'
+  retries: 30
+  delay: 10
+  changed_when: false
+  failed_when: false
+
+- name: Set dex-auth static credentials (local admin user)
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju config -m kubeflow dex-auth
+    static-username=admin
+    static-password=kubeflow-admin-2024
+  changed_when: true
+
+- name: Set dex-auth public issuer URL
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju config -m kubeflow dex-auth issuer-url="{{ kubeflow_dashboard_url }}/dex"
+  changed_when: true
+
+# Write the GitLab OIDC connector configuration to a YAML file.
+# IMPORTANT: We write to /home/{{ vm_user }}/ instead of /tmp/ because Juju is
+# installed as a snap with strict confinement. Snaps cannot read files from
+# /tmp/ due to their sandboxed filesystem namespace. Writing to the user home
+# ensures Juju can access the file when we apply it with the '@' prefix.
+- name: Write dex-auth GitLab connector configuration
+  ansible.builtin.copy:
+    dest: /home/{{ vm_user }}/dex_connectors.yaml
+    owner: "{{ vm_user }}"
+    group: "{{ vm_user }}"
+    mode: "0600"
+    content: |
+      - type: gitlab
+        id: gitlab
+        name: GitLab
+        config:
+          baseURL: "{{ gitlab_base_url }}"
+          clientID: "{{ gitlab_oauth_creds.client_id }}"
+          clientSecret: "{{ gitlab_oauth_creds.client_secret }}"
+          redirectURI: "{{ kubeflow_dashboard_url }}/dex/callback"
+          scopes:
+            - openid
+            - profile
+            - email
+
+- name: Apply dex-auth GitLab connector configuration
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju config -m kubeflow dex-auth connectors=@/home/{{ vm_user }}/dex_connectors.yaml
+  changed_when: true
+
+- name: Wait for jupyter-ui application to become active
+  ansible.builtin.shell: >
+    sudo -u {{ vm_user }} -i juju status -m kubeflow --format=json
+    | jq -r '.applications["jupyter-ui"]["application-status"].current'
+  register: jupyter_ui_status
+  until: jupyter_ui_status.stdout == 'active'
+  retries: 30
+  delay: 10
+  changed_when: false
+  failed_when: false
+
+- name: Configure jupyter-ui image list to include Elyra image
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju config -m kubeflow jupyter-ui
+    jupyter-images='["ahmed8603/elyra:v4",
+    "ahmed8603/elyra:v4-shared",
+    "ahmed8603/elyra:v2",
+    "charmedkubeflow/jupyter-scipy:1.10.0-0be57a5",
+    "docker.io/charmedkubeflow/jupyter-pytorch-full:v1.10.0-ef85ffd",
+    "kubeflownotebookswg/jupyter-pytorch-cuda-full:v1.10.0",
+    "kubeflownotebookswg/jupyter-pytorch-gaudi-full:v1.10.0",
+    "charmedkubeflow/jupyter-tensorflow-full:1.10.0-448e378",
+    "kubeflownotebookswg/jupyter-tensorflow-cuda-full:v1.10.0"]'
+  changed_when: true
+
+- name: Configure jupyter-ui default PodDefaults to include MLflow and Minio access
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju config -m kubeflow jupyter-ui
+    default-poddefaults='["access-ml-pipeline", "elyra-minio-access"]'
+  changed_when: true
+
+# ---- Add MinIO Console sidebar link to Kubeflow Dashboard --------------------
+# Adds a "MinIO" entry in the dashboard left sidebar.  The {ns} placeholder is
+# replaced by the Kubeflow Central Dashboard with the currently selected
+# namespace, so clicking "MinIO" auto-redirects through the Admin Portal's
+# auto-login proxy to the namespace-local MinIO Console.
+- name: Write MinIO sidebar link YAML for kubeflow-dashboard
+  ansible.builtin.copy:
+    dest: /home/{{ vm_user }}/minio_menu_link.yaml
+    owner: "{{ vm_user }}"
+    group: "{{ vm_user }}"
+    mode: "0600"
+    content: |
+      - text: MinIO Storage
+        link: /api/minio/login/{ns}
+        icon: folder
+
+- name: Apply MinIO sidebar link to kubeflow-dashboard
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju config -m kubeflow kubeflow-dashboard
+    additional-menu-links=@/home/{{ vm_user }}/minio_menu_link.yaml
+  changed_when: true
+
+# ---- Patch DecoratorController to prevent MinIO secret rotation -------------
+# kfp-profile-controller (Metacontroller) manages the 'mlpipeline-minio-artifact'
+# secret in every user namespace. On each restart it regenerates random credentials,
+# breaking per-user MinIO pods and Elyra PodDefault credential injection.
+# We remove 'secrets' from its attachment list so it never touches those secrets again.
+- name: Remove secrets attachment from kfp-profile-controller DecoratorController
+  ansible.builtin.shell: |
+    microk8s kubectl get decoratorcontroller \
+      kubeflow-pipelines-profile-controller -o json | \
+    python3 -c "
+    import sys, json, subprocess
+    dc = json.load(sys.stdin)
+    dc['spec']['attachments'] = [
+      a for a in dc['spec'].get('attachments', [])
+      if a.get('resource') != 'secrets'
+    ]
+    proc = subprocess.run(
+      ['microk8s', 'kubectl', 'apply', '-f', '-'],
+      input=json.dumps(dc), capture_output=True, text=True
+    )
+    print(proc.stdout or proc.stderr)
+    "
+  delegate_to: "{{ groups['master'][0] }}"
+  register: dc_patch
+  changed_when: "'configured' in dc_patch.stdout or 'unchanged' in dc_patch.stdout"
+  failed_when: false
+
+- name: Confirm DecoratorController patch applied
+  ansible.builtin.debug:
+    msg: "DecoratorController patched — mlpipeline-minio-artifact will not be rotated on restarts"
+
+# ---- Expose MinIO API via NodePort for external access ----------------------
+# The Admin Portal (running on the GitLab VM) needs to reach the MinIO API
+# to provision per-user credentials. ClusterIPs are not routable from outside
+# the cluster, so we expose MinIO on a fixed NodePort (30900) so the GitLab
+# VM can reach it via the controlplane node IP.
+- name: Expose MinIO API as NodePort 30900
+  ansible.builtin.command: >
+    kubectl patch svc minio -n kubeflow --type=json
+    -p='[{"op":"replace","path":"/spec/type","value":"NodePort"},{"op":"add","path":"/spec/ports/0/nodePort","value":30900}]'
+  environment:
+    KUBECONFIG: /root/.kube/config
+  delegate_to: "{{ groups['master'][0] }}"
+  register: minio_nodeport
+  changed_when: "'patched' in minio_nodeport.stdout"
+  failed_when:
+    - minio_nodeport.rc != 0
+    - "'no change' not in minio_nodeport.stdout"
+
+# ---- Automate MinIO Console Port 9001 Expose on Controlplane ----------------
+- name: Deploy MinIO Console Port 9001 Systemd Service on Controlplane
+  tags: [juju]
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/minio-console-forward.service
+    content: |
+      [Unit]
+      Description=MinIO Console Port 9001 Forwarder
+      After=network.target microk8s.service
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/local/bin/kubectl port-forward --address 0.0.0.0 -n kubeflow svc/minio 9001:9001
+      Restart=always
+      RestartSec=10
+      Environment=KUBECONFIG=/root/.kube/config
+
+      [Install]
+      WantedBy=multi-user.target
+    mode: '0644'
+  delegate_to: "{{ groups['master'][0] }}"
+  register: console_forward_service
+
+- name: Enable and restart MinIO Console Forward service
+  tags: [juju]
+  ansible.builtin.systemd:
+    name: minio-console-forward
+    daemon_reload: true
+    enabled: true
+    state: restarted
+  delegate_to: "{{ groups['master'][0] }}"
+
+# ==============================================================================
+# MLFLOW — Deploy MLflow tracking server + resource-dispatcher
+# ==============================================================================
+# MLflow is an open-source platform for ML experiment tracking, model registry,
+# and model serving. In Charmed Kubeflow it integrates through:
+#
+#   mlflow-server         → tracking server + model registry UI
+#   resource-dispatcher   → propagates MLflow secrets and PodDefaults to every
+#                           user namespace so notebooks auto-get MLFLOW_TRACKING_URI
+#
+# INTEGRATION MAP:
+#
+#   mlflow-server:secrets       ↔ resource-dispatcher:secrets
+#     MLflow S3 credentials Secret gets copied to every user namespace
+#
+#   mlflow-server:pod-defaults  ↔ resource-dispatcher:pod-defaults
+#     A PodDefault is created in every user namespace that injects
+#     MLFLOW_TRACKING_URI into notebook pods automatically
+#
+#   mlflow-minio:object-storage ↔ kserve-controller:object-storage
+#     KServe uses MLflow's MinIO bucket for pulling model artifacts during serving
+#
+#   kserve-controller:service-accounts ↔ resource-dispatcher:service-accounts
+#     KServe ServiceAccounts get propagated to user namespaces for inference
+#
+#   kserve-controller:secrets   ↔ resource-dispatcher:secrets
+#     KServe secrets get propagated alongside MLflow secrets
+#
+#   mlflow-server:ingress       ↔ istio-pilot:ingress
+#     MLflow tracking UI is exposed through the Istio ingress gateway,
+#     reachable at http://10.110.188.200/mlflow
+#
+#   mlflow-server:dashboard-links ↔ kubeflow-dashboard:links
+#     MLflow appears as a link in the Kubeflow dashboard left navigation
+#
+# WHY DEPLOY AFTER JUPYTER-UI CONFIG:
+#   resource-dispatcher must be deployed AFTER kserve-controller is active
+#   (deployed as part of the kubeflow bundle). We deploy MLflow last to avoid
+#   integration ordering issues — all bundle apps must exist before we can
+#   wire up cross-app relations.
+
+# ── Wait for kserve-controller to be active before wiring integrations ────────
+- name: Wait for kserve-controller application to become active
+  tags: [mlflow]
+  ansible.builtin.shell: >
+    sudo -u {{ vm_user }} -i juju status -m kubeflow --format=json
+    | jq -r '.applications["kserve-controller"]["application-status"].current'
+  register: kserve_status
+  until: kserve_status.stdout == 'active'
+  retries: 40
+  delay: 15
+  changed_when: false
+  failed_when: false
+
+# ── Deploy MLflow charm (2.22/stable) ─────────────────────────────────────────
+- name: Check if mlflow-server is already deployed
+  tags: [mlflow]
+  ansible.builtin.shell: >
+    sudo -u {{ vm_user }} -i juju status -m kubeflow --format=json
+    | jq -r '.applications["mlflow-server"] // empty'
+  register: mlflow_check
+  changed_when: false
+  failed_when: false
+
+- name: Deploy mlflow charm (2.22/stable)
+  tags: [mlflow]
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju deploy mlflow
+    --trust
+    --channel=2.22/stable
+    -m kubeflow
+  when: mlflow_check.stdout == ''
+  changed_when: true
+
+# ── Deploy resource-dispatcher charm (2.0/stable) ──────────────────────────────
+- name: Check if resource-dispatcher is already deployed
+  tags: [mlflow]
+  ansible.builtin.shell: >
+    sudo -u {{ vm_user }} -i juju status -m kubeflow --format=json
+    | jq -r '.applications["resource-dispatcher"] // empty'
+  register: rd_check
+  changed_when: false
+  failed_when: false
+
+- name: Deploy resource-dispatcher charm (2.0/stable)
+  tags: [mlflow]
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju deploy resource-dispatcher
+    --channel=2.0/stable
+    --trust
+    -m kubeflow
+  when: rd_check.stdout == ''
+  changed_when: true
+  
+
+# ── Wait for both charms to be present before wiring relations ───────────────
+- name: Wait for mlflow-server application to register
+  tags: [mlflow]
+  ansible.builtin.shell: >
+    sudo -u {{ vm_user }} -i juju status -m kubeflow --format=json
+    | jq -r '.applications["mlflow-server"]["application-status"].current // empty'
+  register: mlflow_status
+  until: mlflow_status.stdout in ['active', 'waiting', 'blocked', 'maintenance']
+  retries: 20
+  delay: 5
+  changed_when: false
+  failed_when: false
+
+- name: Wait for resource-dispatcher application to register
+  tags: [mlflow]
+  ansible.builtin.shell: >
+    sudo -u {{ vm_user }} -i juju status -m kubeflow --format=json
+    | jq -r '.applications["resource-dispatcher"]["application-status"].current // empty'
+  register: rd_status
+  until: rd_status.stdout in ['active', 'waiting', 'blocked', 'maintenance']
+  retries: 20
+  delay: 5
+  changed_when: false
+  failed_when: false
+
+# ── Wire integrations ─────────────────────────────────────────────────────────
+- name: Integrate mlflow-server database with mlflow-db (attempt db:mysql)
+  tags: [mlflow]
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju integrate -m kubeflow
+    mlflow-server:db mlflow-db:mysql
+  register: rel_db1
+  changed_when: rel_db1.rc == 0
+  failed_when: false
+
+- name: Integrate mlflow-server database with mlflow-db (attempt mysql:mysql)
+  tags: [mlflow]
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju integrate -m kubeflow
+    mlflow-server:mysql mlflow-db:mysql
+  register: rel_db2
+  when: rel_db1.rc != 0
+  changed_when: rel_db2.rc == 0
+  failed_when: false
+
+- name: Integrate mlflow-server database with mlflow-db (attempt default)
+  tags: [mlflow]
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju integrate -m kubeflow
+    mlflow-server mlflow-db
+  register: rel_db3
+  when: rel_db1.rc != 0 and rel_db2.rc != 0
+  changed_when: rel_db3.rc == 0
+  failed_when: false
+
+- name: Integrate mlflow-server object-storage with minio
+  tags: [mlflow]
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju integrate -m kubeflow
+    mlflow-server minio
+  register: rel_minio
+  changed_when: rel_minio.rc == 0
+  failed_when:
+    - rel_minio.rc != 0
+    - "'already exists' not in rel_minio.stderr"
+    - "'no relations found' not in rel_minio.stderr"
+    - "'not found' not in rel_minio.stderr"
+
+- name: Integrate mlflow-server secrets with resource-dispatcher
+  tags: [mlflow]
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju integrate -m kubeflow
+    mlflow-server:secrets resource-dispatcher:secrets
+  register: rel1
+  changed_when: rel1.rc == 0
+  failed_when:
+    - rel1.rc != 0
+    - "'already exists' not in rel1.stderr"
+    - "'no relations found' not in rel1.stderr"
+    - "'not found' not in rel1.stderr"
+
+- name: Integrate mlflow-server pod-defaults with resource-dispatcher
+  tags: [mlflow]
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju integrate -m kubeflow
+    mlflow-server:pod-defaults resource-dispatcher:pod-defaults
+  register: rel2
+  changed_when: rel2.rc == 0
+  failed_when:
+    - rel2.rc != 0
+    - "'already exists' not in rel2.stderr"
+    - "'no relations found' not in rel2.stderr"
+    - "'not found' not in rel2.stderr"
+
+- name: Integrate minio object-storage with kserve-controller
+  tags: [mlflow]
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju integrate -m kubeflow
+    minio:object-storage kserve-controller:object-storage
+  register: rel3
+  changed_when: rel3.rc == 0
+  failed_when:
+    - rel3.rc != 0
+    - "'already exists' not in rel3.stderr"
+    - "'no relations found' not in rel3.stderr"
+    - "'not found' not in rel3.stderr"
+
+- name: Integrate kserve-controller service-accounts with resource-dispatcher
+  tags: [mlflow]
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju integrate -m kubeflow
+    kserve-controller:service-accounts resource-dispatcher:service-accounts
+  register: rel4
+  changed_when: rel4.rc == 0
+  failed_when:
+    - rel4.rc != 0
+    - "'already exists' not in rel4.stderr"
+    - "'no relations found' not in rel4.stderr"
+    - "'not found' not in rel4.stderr"
+
+- name: Integrate kserve-controller secrets with resource-dispatcher
+  tags: [mlflow]
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju integrate -m kubeflow
+    kserve-controller:secrets resource-dispatcher:secrets
+  register: rel5
+  changed_when: rel5.rc == 0
+  failed_when:
+    - rel5.rc != 0
+    - "'already exists' not in rel5.stderr"
+    - "'no relations found' not in rel5.stderr"
+    - "'not found' not in rel5.stderr"
+
+- name: Integrate mlflow-server ingress with istio-pilot
+  tags: [mlflow]
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju integrate -m kubeflow
+    mlflow-server:ingress istio-pilot:ingress
+  register: rel6
+  changed_when: rel6.rc == 0
+  failed_when:
+    - rel6.rc != 0
+    - "'already exists' not in rel6.stderr"
+    - "'no relations found' not in rel6.stderr"
+    - "'not found' not in rel6.stderr"
+
+- name: Integrate mlflow-server dashboard-links with kubeflow-dashboard
+  tags: [mlflow]
+  ansible.builtin.command: >
+    sudo -u {{ vm_user }} -i juju integrate -m kubeflow
+    mlflow-server:dashboard-links kubeflow-dashboard:links
+  register: rel7
+  changed_when: rel7.rc == 0
+  failed_when:
+    - rel7.rc != 0
+    - "'already exists' not in rel7.stderr"
+    - "'no relations found' not in rel7.stderr"
+    - "'not found' not in rel7.stderr"
+
+# ── Final status check ────────────────────────────────────────────────────────
+- name: Wait for mlflow-server to reach active/idle after all integrations
+  tags: [mlflow]
+  ansible.builtin.shell: >
+    sudo -u {{ vm_user }} -i juju status -m kubeflow --format=json
+    | jq -r '.applications["mlflow-server"]["application-status"].current'
+  register: mlflow_final
+  until: mlflow_final.stdout == 'active'
+  retries: 40
+  delay: 15
+  changed_when: false
+  failed_when: false
+
+- name: MLflow deployment complete
+  tags: [mlflow]
+  ansible.builtin.debug:
+    msg:
+      - "MLflow tracking UI : {{ kubeflow_dashboard_url }}/mlflow"
+      - "MLflow appears in the Kubeflow dashboard left navigation"
+      - "MLFLOW_TRACKING_URI is auto-injected into notebook pods via PodDefault"
+      - "Reloader ensures pods restart when MLflow S3 credentials rotate"

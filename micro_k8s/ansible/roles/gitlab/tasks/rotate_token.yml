@@ -1,0 +1,238 @@
+---
+# ==============================================================================
+# TOKEN ROTATION — Renew the Admin Portal GitLab PAT and restart the service
+# ==============================================================================
+# Run this whenever the 'kubeflow-admin-portal-token' Personal Access Token
+# expires (it is created with a 365-day lifetime). This task file:
+#   1. Force-deletes the old portal PAT from GitLab's database
+#   2. Creates a fresh one valid for another 365 days
+#   3. Rotates the 'kubeflow-registry-token' impersonation token for every user
+#   4. Updates the Kubernetes gitlab-registry imagePullSecret in each namespace
+#   5. Updates the systemd service unit with the new token value
+#   6. Reloads systemd and restarts the portal service
+#
+# Usage:
+#   ansible-playbook playbook.yml --tags rotate_token
+
+# ---- Force-rotate the portal admin token ------------------------------------
+- name: Force-rotate GitLab API token for Admin Portal
+  ansible.builtin.shell: |
+    gitlab-rails runner "
+      token_name = 'kubeflow-admin-portal-token'
+      user = User.find_by_username('root')
+      user.personal_access_tokens.where(name: token_name).destroy_all
+      token = user.personal_access_tokens.create!(
+        name:       token_name,
+        scopes:     ['api'],
+        expires_at: 365.days.from_now
+      )
+      File.write('/tmp/gitlab_portal_token.txt', token.token)
+    "
+  register: token_rotation
+  changed_when: token_rotation.rc == 0
+
+# ---- Read the new portal token ----------------------------------------------
+- name: Read new GitLab API token
+  ansible.builtin.slurp:
+    src: /tmp/gitlab_portal_token.txt
+  register: token_slurp
+
+- name: Set new GitLab API token fact
+  ansible.builtin.set_fact:
+    gitlab_portal_token: "{{ token_slurp.content | b64decode | trim }}"
+
+- name: Show new token expiry info
+  ansible.builtin.debug:
+    msg: "Portal token rotated successfully. Valid for 365 days."
+
+# ---- Rotate registry imagePullSecrets for all users -------------------------
+# Read passwords from the portal SQLite DB and recreate the K8s secret +
+# patch all Notebook CRs in each user namespace.
+# Uses passwords (not PATs) because GitLab registry JWT auth only accepts
+# username:password, not personal access tokens.
+- name: Read all users and passwords from portal DB
+  ansible.builtin.shell: |
+    sqlite3 /var/lib/portal-data/portal.db \
+      "SELECT username, password FROM users;" | tr '|' ' '
+  register: portal_users
+  changed_when: false
+
+- name: Set portal users fact
+  ansible.builtin.set_fact:
+    registry_users: >-
+      {{ portal_users.stdout_lines
+         | map('split', ' ')
+         | map('list')
+         | selectattr('0', 'ne', '')
+         | list }}
+
+# ---- Update K8s imagePullSecrets for each user namespace --------------------
+- name: Update gitlab-registry imagePullSecret for each user namespace
+  ansible.builtin.shell: |
+    set -e
+    USERNAME="{{ item[0] }}"
+    PASSWORD="{{ item[1] }}"
+    REGISTRY="{{ gitlab_ip }}:5050"
+
+    if ! kubectl get namespace "${USERNAME}" >/dev/null 2>&1; then
+      echo "Namespace ${USERNAME} not found, skipping."
+      exit 0
+    fi
+
+    # Recreate the docker-registry secret with the user's password
+    kubectl create secret docker-registry gitlab-registry \
+      --docker-server="${REGISTRY}" \
+      --docker-username="${USERNAME}" \
+      --docker-password="${PASSWORD}" \
+      --namespace="${USERNAME}" \
+      --dry-run=client -o yaml | kubectl apply -f -
+
+    # Ensure default ServiceAccount has the imagePullSecret
+    kubectl patch serviceaccount default -n "${USERNAME}" \
+      --type merge -p '{"imagePullSecrets":[{"name":"gitlab-registry"}]}'
+
+    # Patch all existing Notebook CRs so running notebooks pick up the secret
+    for NB in $(kubectl get notebooks -n "${USERNAME}" \
+                  -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+      kubectl patch notebook "${NB}" -n "${USERNAME}" \
+        --type json \
+        -p '[{"op":"add","path":"/spec/template/spec/imagePullSecrets","value":[{"name":"gitlab-registry"}]}]' \
+        && echo "Patched notebook ${NB}" || true
+    done
+
+    echo "Updated registry secret for ${USERNAME}"
+  environment:
+    KUBECONFIG: /root/.kube/config
+  loop: "{{ registry_users }}"
+  when: registry_users | length > 0
+  register: secret_update
+  changed_when: "'Updated registry secret' in secret_update.stdout"
+
+- name: Show registry secret update results
+  ansible.builtin.debug:
+    msg: "{{ item.stdout_lines }}"
+  loop: "{{ secret_update.results }}"
+  when: item.stdout_lines is defined
+
+# ---- Update the systemd service unit ----------------------------------------
+- name: Update systemd service unit with new token
+  ansible.builtin.copy:
+    dest: /lib/systemd/system/kubeflow-admin-portal.service
+    content: |
+      [Unit]
+      Description=Charmed Kubeflow Multi-User Admin Portal
+      After=network.target gitlab-runsvdir.service
+
+      [Service]
+      Type=simple
+      User=root
+      WorkingDirectory=/home/{{ vm_user }}/admin-portal
+      ExecStart=/home/{{ vm_user }}/admin-portal/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 7070
+      Restart=always
+      Environment=GITLAB_TOKEN={{ gitlab_portal_token }}
+      Environment=KUBECONFIG=/root/.kube/config
+      Environment=GITLAB_REGISTRY_URL=http://{{ gitlab_ip }}:5050
+
+      [Install]
+      WantedBy=multi-user.target
+    mode: '0644'
+
+# ---- Reload and restart -----------------------------------------------------
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart Admin Portal service with new token
+  ansible.builtin.systemd:
+    name: kubeflow-admin-portal
+    state: restarted
+
+- name: Verify service is running
+  ansible.builtin.command: systemctl is-active kubeflow-admin-portal
+  register: service_status
+  changed_when: false
+  failed_when: service_status.stdout != 'active'
+
+- name: Confirm rotation complete
+  ansible.builtin.debug:
+    msg: "All tokens rotated. Registry secrets updated for {{ registry_tokens | length }} user(s). Service status: {{ service_status.stdout }}"
+
+
+# ---- Force-rotate the token -------------------------------------------------
+# We unconditionally destroy and recreate the token here, unlike the initial
+# portal.yml logic which skips rotation if the token is still valid.
+# This task is only ever run manually when you WANT to rotate.
+- name: Force-rotate GitLab API token for Admin Portal
+  ansible.builtin.shell: |
+    gitlab-rails runner "
+      token_name = 'kubeflow-admin-portal-token'
+      user = User.find_by_username('root')
+      user.personal_access_tokens.where(name: token_name).destroy_all
+      token = user.personal_access_tokens.create!(
+        name:       token_name,
+        scopes:     ['api'],
+        expires_at: 365.days.from_now
+      )
+      File.write('/tmp/gitlab_portal_token.txt', token.token)
+    "
+  register: token_rotation
+  changed_when: token_rotation.rc == 0
+
+# ---- Read the new token -----------------------------------------------------
+- name: Read new GitLab API token
+  ansible.builtin.slurp:
+    src: /tmp/gitlab_portal_token.txt
+  register: token_slurp
+
+- name: Set new GitLab API token fact
+  ansible.builtin.set_fact:
+    gitlab_portal_token: "{{ token_slurp.content | b64decode | trim }}"
+
+- name: Show new token expiry info
+  ansible.builtin.debug:
+    msg: "Token rotated successfully. New token written to systemd service. Valid for 365 days."
+
+# ---- Update the systemd service unit ----------------------------------------
+# The token is injected as Environment=GITLAB_TOKEN=<value> in the unit file.
+# We rewrite the entire unit to ensure the value is current.
+- name: Update systemd service unit with new token
+  ansible.builtin.copy:
+    dest: /lib/systemd/system/kubeflow-admin-portal.service
+    content: |
+      [Unit]
+      Description=Charmed Kubeflow Multi-User Admin Portal
+      After=network.target gitlab-runsvdir.service
+
+      [Service]
+      Type=simple
+      User=root
+      WorkingDirectory=/home/{{ vm_user }}/admin-portal
+      ExecStart=/home/{{ vm_user }}/admin-portal/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 7070
+      Restart=always
+      Environment=GITLAB_TOKEN={{ gitlab_portal_token }}
+      Environment=KUBECONFIG=/root/.kube/config
+      Environment=GITLAB_REGISTRY_URL=http://{{ gitlab_ip }}:5050
+
+      [Install]
+      WantedBy=multi-user.target
+    mode: '0644'
+
+# ---- Reload and restart -----------------------------------------------------
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart Admin Portal service with new token
+  ansible.builtin.systemd:
+    name: kubeflow-admin-portal
+    state: restarted
+
+- name: Verify service is running
+  ansible.builtin.command: systemctl is-active kubeflow-admin-portal
+  register: service_status
+  changed_when: false
+  failed_when: service_status.stdout != 'active'
+
+- name: Confirm rotation complete
+  ansible.builtin.debug:
+    msg: "Admin Portal restarted with the new token. Service status: {{ service_status.stdout }}"

@@ -1,0 +1,26 @@
+---
+# ============================================================
+# METALLB ROLE — applies the IPAddressPool and L2Advertisement
+# ============================================================
+# MicroK8s enables the MetalLB addon (which installs the controller
+# and speaker pods) in the master role via:
+#   microk8s enable metallb:<range>
+#
+# This role renders metallb-pool.yaml as a Jinja2 template (injecting
+# metallb_ip_range from group_vars/all.yml) and applies the resulting
+# manifest to declare the IPAddressPool and L2Advertisement CRs.
+
+- name: Render and copy MetalLB pool manifest to control plane
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/metallb-pool.yaml"
+    dest: /tmp/metallb-pool.yaml
+    mode: '0644'
+
+- name: Apply MetalLB IPAddressPool and L2Advertisement
+  ansible.builtin.command: kubectl apply -f /tmp/metallb-pool.yaml --force
+  register: metallb_apply
+  changed_when: "'configured' in metallb_apply.stdout or 'created' in metallb_apply.stdout"
+  failed_when:
+    - metallb_apply.rc != 0
+    - "'already exists' not in metallb_apply.stderr"
+    - "'overlaps with already defined' not in metallb_apply.stderr"

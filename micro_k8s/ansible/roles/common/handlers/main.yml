@@ -1,0 +1,5 @@
+---
+- name: Restart MicroK8s
+  ansible.builtin.systemd:
+    name: snap.microk8s.daemon-containerd
+    state: restarted

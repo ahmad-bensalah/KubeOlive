@@ -1,0 +1,51 @@
+---
+# ==============================================================================
+# SOURCE OF TRUTH — edit this file only. Everything else is derived from here.
+# Run ./generate-inventory.sh after any change to regenerate inventory.ini.
+# ==============================================================================
+
+# ---- VM access ---------------------------------------------------------------
+vm_user:    "user"
+vm_ssh_key: "~/.ssh/id_ed25519"
+
+# ---- Node IPs ----------------------------------------------------------------
+controlplane:
+  name: controlplane
+  ip:   "10.200.11.199"
+
+workers:
+  - name: node01
+    ip:   "10.200.11.200"
+  - name: node02
+    ip:   "10.200.11.202"
+
+gitlab_ip: "10.200.11.203"
+juju_ip:   "10.200.11.80"
+
+# ---- Networking --------------------------------------------------------------
+network:
+  control_ip:   "{{ controlplane.ip }}"
+  dns_servers:
+    - 8.8.8.8
+    - 1.1.1.1
+  pod_cidr:     "172.16.1.0/16"
+  service_cidr: "172.17.1.0/18"
+
+# The subnet shared by all VMs — used by GitLab to trust forwarded requests
+# from the Kubeflow/Istio ingress.
+vm_subnet: "10.200.11.0/22"
+
+# MetalLB LoadBalancer pool — first IP is the Kubeflow dashboard address.
+metallb_ip_range:      "10.200.11.81-10.200.11.85"
+kubeflow_dashboard_ip: "10.200.11.200"
+
+# ---- Software versions -------------------------------------------------------
+software:
+  box:        bento/ubuntu-24.04
+  calico:     "3.26.0"
+  kubernetes: "1.31.0-*"
+
+# ---- Derived URLs (do not edit) ----------------------------------------------
+gitlab_base_url:        "http://{{ gitlab_ip }}"
+gitlab_registry_url:    "http://{{ gitlab_ip }}:5050"
+kubeflow_dashboard_url: "http://{{ kubeflow_dashboard_ip }}"

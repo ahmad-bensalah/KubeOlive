@@ -1,0 +1,1841 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kubeflow Multi-User Admin Portal</title>
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        :root {
+            --bg: #0b0f19;
+            --sidebar: #0f172a;
+            --card-bg: rgba(17, 24, 39, 0.6);
+            --accent: #38bdf8;
+            --accent-glow: rgba(56, 189, 248, 0.25);
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --border: rgba(255, 255, 255, 0.06);
+            --success: #10b981;
+            --warning: #f59e0b;
+            --error: #ef4444;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg);
+            color: var(--text-main);
+            display: flex;
+            min-height: 100vh;
+            overflow-x: hidden;
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(56, 189, 248, 0.08) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.05) 0px, transparent 50%);
+        }
+
+        /* Login Screen */
+        .login-screen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: var(--bg);
+            z-index: 10000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .login-box {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 24px;
+            padding: 50px 60px;
+            backdrop-filter: blur(12px);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+            text-align: center;
+            max-width: 450px;
+            width: 90%;
+        }
+
+        .login-box h2 {
+            margin-bottom: 10px;
+            font-size: 1.8rem;
+        }
+
+        .login-box p {
+            color: var(--text-muted);
+            margin-bottom: 30px;
+            font-size: 0.9rem;
+        }
+
+        .login-box .form-group {
+            text-align: left;
+            margin-bottom: 20px;
+        }
+
+        .login-box label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .login-box input {
+            width: 100%;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 14px 16px;
+            color: var(--text-main);
+            font-family: inherit;
+            font-size: 0.95rem;
+            outline: none;
+            transition: all 0.3s ease;
+        }
+
+        .login-box input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-glow);
+        }
+
+        .login-box button {
+            width: 100%;
+            background: var(--accent);
+            color: #0b0f19;
+            border: none;
+            border-radius: 12px;
+            padding: 14px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .login-box button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(56, 189, 248, 0.3);
+        }
+
+        .login-error {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.2);
+            color: var(--error);
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 0.85rem;
+        }
+
+        /* Modal for delete confirmation */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(4px);
+            z-index: 9999;
+            display: none;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-overlay.show {
+            display: flex;
+        }
+
+        .modal {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 30px;
+            max-width: 500px;
+            width: 90%;
+            backdrop-filter: blur(12px);
+        }
+
+        .modal h3 {
+            color: var(--error);
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .modal p {
+            color: var(--text-muted);
+            margin-bottom: 20px;
+            line-height: 1.6;
+        }
+
+        .modal .confirm-text {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.2);
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .modal .confirm-text strong {
+            color: var(--error);
+            font-family: monospace;
+        }
+
+        .modal-buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .modal-buttons button {
+            flex: 1;
+            padding: 12px;
+            border-radius: 8px;
+            border: none;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .modal-buttons .btn-cancel {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-main);
+        }
+
+        .modal-buttons .btn-cancel:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .modal-buttons .btn-delete {
+            background: var(--error);
+            color: white;
+        }
+
+        .modal-buttons .btn-delete:hover {
+            background: #dc2626;
+        }
+
+        .modal-buttons .btn-delete:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Sidebar styling */
+        .sidebar {
+            width: 280px;
+            background: var(--sidebar);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            padding: 30px 20px;
+            height: 100vh;
+            position: fixed;
+        }
+
+        .logo {
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: var(--text-main);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 30px;
+        }
+
+        .logo i {
+            color: var(--accent);
+        }
+
+        .logo span {
+            color: var(--accent);
+            font-weight: 300;
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 14px 16px;
+            border-radius: 12px;
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-bottom: 8px;
+            text-decoration: none;
+            font-weight: 500;
+        }
+
+        .nav-item:hover, .nav-item.active {
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .nav-item.active {
+            background: var(--accent-glow);
+            border: 1px solid rgba(56, 189, 248, 0.15);
+            color: var(--accent);
+        }
+
+        .badge-portal {
+            background: var(--accent);
+            color: #0b0f19;
+            padding: 3px 8px;
+            border-radius: 6px;
+            font-size: 0.65rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 20px;
+            text-align: center;
+            display: inline-block;
+        }
+
+        /* Main Content container */
+        .content {
+            margin-left: 280px;
+            flex: 1;
+            padding: 40px;
+            max-width: 1400px;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 40px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 20px;
+        }
+
+        header h1 {
+            font-weight: 600;
+            font-size: 2rem;
+        }
+
+        header h1 span {
+            font-weight: 300;
+            color: var(--text-muted);
+        }
+
+        /* Health widgets */
+        .health-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+
+        .health-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            backdrop-filter: blur(10px);
+        }
+
+        .health-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.02);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .health-details h3 {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 4px;
+        }
+
+        .health-details p {
+            font-size: 1.1rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .status-dot.ok { background: var(--success); box-shadow: 0 0 10px var(--success); }
+        .status-dot.error { background: var(--error); box-shadow: 0 0 10px var(--error); }
+        .status-dot.pending { background: var(--warning); box-shadow: 0 0 10px var(--warning); }
+
+        /* Forms and directory grid */
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr 1.8fr;
+            gap: 30px;
+            align-items: start;
+        }
+
+        @media (max-width: 1024px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .glass-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 24px;
+            padding: 30px;
+            backdrop-filter: blur(12px);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+        }
+
+        .card-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 25px;
+            color: var(--accent);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* Form elements */
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .input-wrapper {
+            position: relative;
+        }
+
+        input {
+            width: 100%;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 14px 16px;
+            color: var(--text-main);
+            font-family: inherit;
+            font-size: 0.95rem;
+            outline: none;
+            transition: all 0.3s ease;
+        }
+
+        input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-glow);
+        }
+
+        .pw-gen-btn {
+            position: absolute;
+            right: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: var(--accent-glow);
+            border: 1px solid rgba(56, 189, 248, 0.2);
+            color: var(--accent);
+            padding: 6px 12px;
+            border-radius: 8px;
+            font-size: 0.75rem;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+
+        .pw-gen-btn:hover {
+            background: var(--accent);
+            color: #0b0f19;
+        }
+
+        button.btn-primary {
+            width: 100%;
+            background: var(--accent);
+            color: #0b0f19;
+            border: none;
+            border-radius: 12px;
+            padding: 14px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        button.btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(56, 189, 248, 0.3);
+        }
+
+        button.btn-primary:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none !important;
+            box-shadow: none !important;
+        }
+
+        /* Tables & Lists */
+        .table-container {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+        }
+
+        th {
+            padding: 16px 12px;
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+        }
+
+        td {
+            padding: 20px 12px;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.95rem;
+            vertical-align: middle;
+        }
+
+        .user-meta {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .user-meta .name {
+            font-weight: 600;
+        }
+
+        .user-meta .username {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            font-family: monospace;
+        }
+
+        .pw-cell {
+            font-family: monospace;
+            background: rgba(0, 0, 0, 0.25);
+            padding: 6px 10px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            font-size: 0.85rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .pw-cell .pw-text {
+            min-width: 120px;
+        }
+
+        .pw-cell .pw-hidden {
+            letter-spacing: 0.2em;
+        }
+
+        .eye-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            padding: 2px;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+
+        .eye-btn:hover {
+            color: var(--accent);
+            background: var(--accent-glow);
+        }
+
+        .copy-btn {
+            background: none;
+            border: none;
+            color: var(--accent);
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            padding: 2px;
+            border-radius: 4px;
+            transition: background 0.2s;
+        }
+
+        .copy-btn:hover {
+            background: var(--accent-glow);
+        }
+
+        .badge {
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.02em;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .badge.ready { background: rgba(16, 185, 129, 0.1); color: var(--success); border: 1px solid rgba(16, 185, 129, 0.2); }
+        .badge.pending { background: rgba(245, 158, 11, 0.1); color: var(--warning); border: 1px solid rgba(245, 158, 11, 0.2); animation: pulse 2s infinite; }
+        .badge.error { background: rgba(239, 68, 68, 0.1); color: var(--error); border: 1px solid rgba(239, 68, 68, 0.2); }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.6; }
+            100% { opacity: 1; }
+        }
+
+        .delete-btn {
+            color: var(--error);
+            cursor: pointer;
+            transition: all 0.2s;
+            padding: 8px;
+            border-radius: 8px;
+            display: inline-flex;
+            align-items: center;
+            border: none;
+            background: none;
+        }
+
+        .delete-btn:hover {
+            background: rgba(239, 68, 68, 0.1);
+            transform: scale(1.08);
+        }
+
+        .spin {
+            animation: rotate 2s linear infinite;
+        }
+
+        @keyframes rotate {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+
+        /* Toast container */
+        #toast-container {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            z-index: 9999;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .toast {
+            background: #1e293b;
+            border: 1px solid var(--border);
+            border-left: 4px solid var(--accent);
+            padding: 16px 24px;
+            border-radius: 12px;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 300px;
+            transform: translateY(20px);
+            opacity: 0;
+            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .toast.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+
+        .toast.error {
+            border-left-color: var(--error);
+        }
+
+        /* ---- Quota Group styles ---- */
+        .section-page { display: none; }
+        .section-page.active { display: block; }
+
+        .quota-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 24px;
+        }
+
+        .quota-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 24px;
+            backdrop-filter: blur(10px);
+            transition: border-color 0.2s;
+        }
+
+        .quota-card:hover { border-color: rgba(56,189,248,0.3); }
+
+        .quota-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 16px;
+        }
+
+        .quota-card-name {
+            font-size: 1rem;
+            font-weight: 700;
+            color: var(--text-main);
+        }
+
+        .quota-card-desc {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+
+        .quota-card-actions {
+            display: flex;
+            gap: 6px;
+        }
+
+        .icon-btn {
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 6px;
+            border-radius: 8px;
+            color: var(--text-muted);
+            transition: all 0.2s;
+            display: inline-flex;
+        }
+
+        .icon-btn:hover { background: rgba(255,255,255,0.06); color: var(--accent); }
+        .icon-btn.danger:hover { background: rgba(239,68,68,0.1); color: var(--error); }
+
+        .quota-limits {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .limit-item {
+            background: rgba(0,0,0,0.2);
+            border-radius: 10px;
+            padding: 10px 12px;
+        }
+
+        .limit-label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 4px;
+        }
+
+        .limit-value {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--accent);
+        }
+
+        .quota-footer {
+            margin-top: 14px;
+            font-size: 0.78rem;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        /* Quota modal form */
+        .quota-modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.7);
+            backdrop-filter: blur(4px);
+            z-index: 9998;
+            display: none;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .quota-modal-overlay.show { display: flex; }
+
+        .quota-modal {
+            background: #0f172a;
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 32px;
+            width: 480px;
+            max-width: 95vw;
+        }
+
+        .quota-modal h3 {
+            font-size: 1.1rem;
+            margin-bottom: 24px;
+            color: var(--accent);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+
+        .quota-modal-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 24px;
+        }
+
+        .quota-modal-actions button { flex: 1; }
+
+        /* Dashboard stats */
+        .dash-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 32px;
+        }
+
+        .stat-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 20px 24px;
+            backdrop-filter: blur(10px);
+        }
+
+        .stat-label {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 8px;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: var(--accent);
+        }
+
+        .chart-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+            gap: 24px;
+        }
+
+        .chart-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 24px;
+            backdrop-filter: blur(10px);
+        }
+
+        .chart-card h4 {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 16px;
+        }
+
+        .bar-chart { display: flex; flex-direction: column; gap: 10px; }
+
+        .bar-row { display: flex; align-items: center; gap: 10px; font-size: 0.85rem; }
+
+        .bar-label { width: 130px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+        .bar-track { flex: 1; height: 8px; background: rgba(255,255,255,0.05); border-radius: 4px; overflow: hidden; }
+
+        .bar-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.5s ease; }
+
+        .bar-val { width: 60px; text-align: right; color: var(--text-main); font-weight: 600; }
+
+        select {
+            width: 100%;
+            background: rgba(0,0,0,0.2);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 14px 16px;
+            color: var(--text-main);
+            font-family: inherit;
+            font-size: 0.95rem;
+            outline: none;
+            transition: all 0.3s ease;
+            appearance: none;
+            cursor: pointer;
+        }
+
+        select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
+
+        select option { background: #1e293b; color: var(--text-main); }
+
+        .page-toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .btn-secondary {
+            background: rgba(56,189,248,0.1);
+            border: 1px solid rgba(56,189,248,0.2);
+            color: var(--accent);
+            border-radius: 10px;
+            padding: 10px 18px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.2s;
+        }
+
+        .btn-secondary:hover { background: rgba(56,189,248,0.2); }
+
+        .nav-separator {
+            border: none;
+            border-top: 1px solid var(--border);
+            margin: 12px 0;
+        }
+    </style>
+</head>
+<body>
+    <!-- Delete Confirmation Modal -->
+    <div class="modal-overlay" id="delete-modal">
+        <div class="modal">
+            <h3>
+                <i data-lucide="alert-triangle"></i>
+                Delete User Permanently
+            </h3>
+            <p>This action cannot be undone. This will permanently delete:</p>
+            <ul style="color: var(--text-muted); margin-left: 20px; margin-bottom: 15px; line-height: 1.8;">
+                <li>GitLab account for <strong id="delete-user-name"></strong></li>
+                <li>Kubeflow namespace and all resources</li>
+                <li>All user data and pipelines</li>
+            </ul>
+            <div class="confirm-text">
+                Please type <strong id="delete-username-confirm"></strong> to confirm deletion.
+            </div>
+            <div class="form-group">
+                <input type="text" id="delete-confirmation-input" placeholder="Type username here" style="width: 100%;">
+            </div>
+            <div class="modal-buttons">
+                <button class="btn-cancel" onclick="closeDeleteModal()">Cancel</button>
+                <button class="btn-delete" id="delete-confirm-btn" disabled onclick="confirmDelete()">
+                    <i data-lucide="trash-2"></i> Delete User
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast-container"></div>
+
+    <div class="sidebar">
+        <div class="logo">
+            <img src="/static/logo.png" alt="Logo" style="height: 32px; width: auto;">
+            <div>Kubeflow <span>Portal</span></div>
+        </div>
+        <span class="badge-portal">Multi-Tenant Admin</span>
+        
+        <a href="#" class="nav-item active" onclick="showPage('users', this)">
+            <i data-lucide="users"></i>
+            User Provisioner
+        </a>
+        <hr class="nav-separator">
+        <a href="#" class="nav-item" onclick="showPage('quota', this)">
+            <i data-lucide="sliders"></i>
+            Resource Quotas
+        </a>
+        <hr class="nav-separator">
+        <a href="{{ kubeflow_dashboard_url }}" target="_blank" class="nav-item">
+            <i data-lucide="external-link"></i>
+            Kubeflow Dashboard
+        </a>
+        <a href="{{ gitlab_base_url }}" target="_blank" class="nav-item">
+            <i data-lucide="git-branch"></i>
+            GitLab Server
+        </a>
+        <a href="http://{{ workers[0].ip }}:30080" target="_blank" class="nav-item">
+            <i data-lucide="hard-drive"></i>
+            Longhorn Dashboard
+        </a>
+    </div>
+
+    <div class="content">
+        <!-- ================================================================
+             PAGE: User Provisioner
+        ================================================================ -->
+        <div id="page-users" class="section-page active">
+        <header>
+            <h1>User <span>Identity Control</span></h1>
+            <p id="system-time" style="color: var(--text-muted); font-size: 0.9rem; font-weight: 500;"></p>
+        </header>
+
+        <!-- Health Dashboard Widget -->
+        <div class="health-grid">
+            <div class="health-card">
+                <div class="health-icon">
+                    <i data-lucide="git-merge" style="color: var(--accent);"></i>
+                </div>
+                <div class="health-details">
+                    <h3>GitLab Link</h3>
+                    <p id="status-gitlab"><span class="status-dot pending"></span> Connecting</p>
+                </div>
+            </div>
+            <div class="health-card">
+                <div class="health-icon">
+                    <i data-lucide="container" style="color: var(--success);"></i>
+                </div>
+                <div class="health-details">
+                    <h3>K8s API Server</h3>
+                    <p id="status-k8s"><span class="status-dot pending"></span> Connecting</p>
+                </div>
+            </div>
+            <div class="health-card">
+                <div class="health-icon">
+                    <i data-lucide="hard-drive" style="color: #fb923c;"></i>
+                </div>
+                <div class="health-details">
+                    <h3>Longhorn Storage</h3>
+                    <p id="status-longhorn"><span class="status-dot pending"></span> Connecting</p>
+                </div>
+            </div>
+            <div class="health-card">
+                <div class="health-icon">
+                    <i data-lucide="users-2" style="color: var(--warning);"></i>
+                </div>
+                <div class="health-details">
+                    <h3>Active Users</h3>
+                    <p id="active-user-count">0</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="main-grid">
+            <!-- Provision Form -->
+            <div class="glass-card">
+                <div class="card-title">
+                    <i data-lucide="user-plus"></i> Provision MLOps Account
+                </div>
+                <div class="form-group">
+                    <label>Full Display Name</label>
+                    <input type="text" id="fullname" placeholder="e.g. John Doe">
+                </div>
+                <div class="form-group">
+                    <label>Username (used for Namespace)</label>
+                    <input type="text" id="username" placeholder="e.g. johndoe">
+                </div>
+                <div class="form-group">
+                    <label>Corporate Email (OIDC Identifier)</label>
+                    <input type="email" id="email" placeholder="e.g. johndoe@company.com">
+                </div>
+                <div class="form-group">
+                    <label>Initial Secure Password</label>
+                    <div class="input-wrapper">
+                        <input type="text" id="password" placeholder="Min. 8 characters">
+                        <button class="pw-gen-btn" onclick="generatePassword()">Generate</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Resource Quota Group <span style="color: var(--text-muted); font-weight:400;">(optional)</span></label>
+                    <select id="quota-group-select">
+                        <option value="">Unlimited (No Resource Limits)</option>
+                    </select>
+                </div>
+                <button class="btn-primary" id="submit-btn" onclick="provisionUser()">
+                    <i data-lucide="user-check"></i> Provision Identity & Namespace
+                </button>
+            </div>
+
+            <!-- Directory -->
+            <div class="glass-card">
+                <div class="card-title">
+                    <i data-lucide="database"></i> Identity Directory
+                </div>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>User Profile</th>
+                                <th>Email</th>
+                                <th>Kubeflow Password</th>
+                                <th>Quota Group</th>
+                                <th>K8s Profile Status</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="directory-body">
+                            <tr>
+                                <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 30px;">
+                                    <i data-lucide="loader" class="spin" style="margin-bottom: 8px;"></i> Loading active users...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div><!-- /main-grid -->
+        </div><!-- /page-users -->
+
+        <!-- ================================================================
+             PAGE: Resource Quota Groups
+        ================================================================ -->
+        <div id="page-quota" class="section-page">
+            <header>
+                <h1>Resource <span>Quota Groups</span></h1>
+                <p id="system-time-quota" style="color: var(--text-muted); font-size: 0.9rem; font-weight: 500;"></p>
+            </header>
+            <div class="page-toolbar">
+                <p style="color: var(--text-muted); font-size: 0.9rem;">Manage namespace resource limits applied to Kubeflow users.</p>
+                <div style="display:flex; gap:10px;">
+                    <button class="btn-secondary" onclick="manualSync()">
+                        <i data-lucide="refresh-cw"></i> Sync Kubernetes
+                    </button>
+                    <button class="btn-secondary" onclick="openQuotaModal()">
+                        <i data-lucide="plus"></i> New Quota Group
+                    </button>
+                </div>
+            </div>
+            <div id="quota-list" class="quota-grid">
+                <p style="color: var(--text-muted);">Loading quota groups...</p>
+            </div>
+        </div><!-- /page-quota -->
+
+    </div><!-- /content -->
+
+    <!-- Quota Group Create/Edit Modal -->
+    <div class="quota-modal-overlay" id="quota-modal">
+        <div class="quota-modal">
+            <h3><i data-lucide="sliders"></i> <span id="quota-modal-title">New Quota Group</span></h3>
+            <input type="hidden" id="quota-modal-id">
+            <div class="form-group">
+                <label>Group Name</label>
+                <input type="text" id="qm-name" placeholder="e.g. Standard Users">
+            </div>
+            <div class="form-group">
+                <label>Description <span style="color:var(--text-muted);font-weight:400;">(optional)</span></label>
+                <input type="text" id="qm-desc" placeholder="e.g. Default quota for ML engineers">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>CPU Limit (cores)</label>
+                    <input type="number" id="qm-cpu" placeholder="e.g. 4" min="0.1" step="0.5">
+                </div>
+                <div class="form-group">
+                    <label>GPU Limit</label>
+                    <input type="number" id="qm-gpu" placeholder="e.g. 0" min="0" step="1" value="0">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Memory Limit (Gi)</label>
+                    <input type="text" id="qm-memory" placeholder="e.g. 16Gi">
+                </div>
+                <div class="form-group">
+                    <label>Storage Limit (Gi)</label>
+                    <input type="text" id="qm-storage" placeholder="e.g. 50Gi">
+                </div>
+            </div>
+            <div class="quota-modal-actions">
+                <button class="btn-secondary" onclick="closeQuotaModal()" style="flex:1;">Cancel</button>
+                <button class="btn-primary" id="qm-save-btn" onclick="saveQuotaGroup()" style="flex:2;">
+                    <i data-lucide="save"></i> Save Group
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Quota Reassign Modal -->
+    <div class="quota-modal-overlay" id="reassign-modal">
+        <div class="quota-modal" style="width:420px;">
+            <h3><i data-lucide="sliders"></i> Change Quota Group</h3>
+            <input type="hidden" id="reassign-username">
+            <p style="color:var(--text-muted);font-size:0.87rem;margin-bottom:20px;">
+                User: <strong id="reassign-display-name" style="color:var(--text-main);"></strong>
+            </p>
+            <div class="form-group">
+                <label>Quota Group</label>
+                <select id="reassign-group-select">
+                    <option value="">Unlimited (No Resource Limits)</option>
+                </select>
+            </div>
+            <div class="quota-modal-actions">
+                <button class="btn-secondary" onclick="closeReassignModal()" style="flex:1;">Cancel</button>
+                <button class="btn-primary" id="reassign-save-btn" onclick="saveReassign()" style="flex:2;">
+                    <i data-lucide="save"></i> Apply
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ============================================================
+        // Navigation
+        // ============================================================
+        function showPage(page, el) {
+            document.querySelectorAll('.section-page').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.nav-item:not([target])').forEach(n => n.classList.remove('active'));
+            document.getElementById('page-' + page).classList.add('active');
+            if (el) el.classList.add('active');
+            if (page === 'quota') fetchQuotaGroups();
+        }
+
+        // ============================================================
+        // Delete modal (users)
+        // ============================================================
+        let deleteModalData = null;
+
+        function openDeleteModal(gitlabId, username, name) {
+            deleteModalData = { gitlabId, username, name };
+            document.getElementById('delete-user-name').textContent = `@${username}`;
+            document.getElementById('delete-username-confirm').textContent = username;
+            document.getElementById('delete-confirmation-input').value = '';
+            document.getElementById('delete-confirm-btn').disabled = true;
+            document.getElementById('delete-modal').classList.add('show');
+            lucide.createIcons();
+        }
+
+        function closeDeleteModal() {
+            document.getElementById('delete-modal').classList.remove('show');
+            deleteModalData = null;
+        }
+
+        // Enable delete button only when username matches
+        document.addEventListener('DOMContentLoaded', () => {
+            const input = document.getElementById('delete-confirmation-input');
+            if (input) {
+                input.addEventListener('input', (e) => {
+                    const btn = document.getElementById('delete-confirm-btn');
+                    if (deleteModalData && e.target.value === deleteModalData.username) {
+                        btn.disabled = false;
+                    } else {
+                        btn.disabled = true;
+                    }
+                });
+            }
+        });
+
+        async function confirmDelete() {
+            if (!deleteModalData) return;
+            
+            const btn = document.getElementById('delete-confirm-btn');
+            btn.disabled = true;
+            btn.innerHTML = '<i data-lucide="loader" class="spin"></i> Deleting...';
+            lucide.createIcons();
+            
+            try {
+                const res = await fetch(`/api/users/${deleteModalData.gitlabId}/${deleteModalData.username}`, {
+                    method: 'DELETE'
+                });
+
+                const data = await res.json();
+                if (res.ok) {
+                    showToast(`User @${deleteModalData.username} decommissioned successfully.`);
+                    closeDeleteModal();
+                    fetchUsers();
+                } else {
+                    showToast(data.detail || 'Failed to decommission user.', true);
+                    btn.disabled = false;
+                    btn.innerHTML = '<i data-lucide="trash-2"></i> Delete User';
+                    lucide.createIcons();
+                }
+            } catch (e) {
+                showToast('Server connection error.', true);
+                btn.disabled = false;
+                btn.innerHTML = '<i data-lucide="trash-2"></i> Delete User';
+                lucide.createIcons();
+            }
+        }
+
+        // Set local system time
+        function updateTime() {
+            const timeEl = document.getElementById("system-time");
+            const now = new Date();
+            timeEl.innerText = now.toLocaleString();
+        }
+        setInterval(updateTime, 1000);
+        updateTime();
+
+        // Toast Messages
+        function showToast(message, isError = false) {
+            const container = document.getElementById("toast-container");
+            const t = document.createElement("div");
+            t.className = `toast ${isError ? 'error' : ''}`;
+            t.innerHTML = `
+                <i data-lucide="${isError ? 'alert-triangle' : 'check-circle'}" style="color: ${isError ? 'var(--error)' : 'var(--success)'}"></i>
+                <span>${message}</span>
+            `;
+            container.appendChild(t);
+            lucide.createIcons();
+            
+            // Trigger animation
+            setTimeout(() => t.classList.add("show"), 50);
+            
+            // Remove after 5 seconds
+            setTimeout(() => {
+                t.classList.remove("show");
+                setTimeout(() => t.remove(), 300);
+            }, 5000);
+        }
+
+        // Generate Random Password Helper
+        function generatePassword() {
+            const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+";
+            let pass = "";
+            for (let i = 0; i < 12; i++) {
+                pass += chars.charAt(Math.floor(Math.random() * chars.length));
+            }
+            document.getElementById("password").value = pass;
+        }
+
+        // Copy password to clipboard helper
+        function copyPassword(text, btn) {
+            if (!navigator.clipboard) {
+                // Fallback for older browsers
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.style.position = 'fixed';
+                textarea.style.opacity = '0';
+                document.body.appendChild(textarea);
+                textarea.select();
+                try {
+                    document.execCommand('copy');
+                    showToast("Password copied to clipboard!");
+                } catch (err) {
+                    showToast("Failed to copy password.", true);
+                }
+                document.body.removeChild(textarea);
+            } else {
+                navigator.clipboard.writeText(text).then(() => {
+                    showToast("Password copied to clipboard!");
+                    const originalIcon = btn.querySelector('i').getAttribute('data-lucide');
+                    btn.innerHTML = `<i data-lucide="check" style="width: 14px; height: 14px; color: var(--success)"></i>`;
+                    lucide.createIcons();
+                    setTimeout(() => {
+                        btn.innerHTML = `<i data-lucide="${originalIcon}" style="width: 14px; height: 14px;"></i>`;
+                        lucide.createIcons();
+                    }, 2000);
+                }).catch(err => {
+                    showToast("Failed to copy password.", true);
+                });
+            }
+        }
+
+        // Toggle password visibility
+        function togglePassword(password, btn, span) {
+            const isHidden = span.classList.contains('pw-hidden');
+            if (isHidden) {
+                span.textContent = password;
+                span.classList.remove('pw-hidden');
+                btn.innerHTML = `<i data-lucide="eye-off" style="width: 14px; height: 14px;"></i>`;
+            } else {
+                span.textContent = '••••••••••••';
+                span.classList.add('pw-hidden');
+                btn.innerHTML = `<i data-lucide="eye" style="width: 14px; height: 14px;"></i>`;
+            }
+            lucide.createIcons();
+        }
+
+        // Fetch Health Status
+        async function fetchHealth() {
+            try {
+                const res = await fetch("/api/health");
+                const data = await res.json();
+                
+                const gitlabEl = document.getElementById("status-gitlab");
+                const k8sEl = document.getElementById("status-k8s");
+                const longhornEl = document.getElementById("status-longhorn");
+                
+                if (data.gitlab_reachable) {
+                    gitlabEl.innerHTML = `<span class="status-dot ok"></span> Connected`;
+                } else {
+                    gitlabEl.innerHTML = `<span class="status-dot error"></span> Unreachable`;
+                }
+
+                if (data.kubernetes_reachable) {
+                    k8sEl.innerHTML = `<span class="status-dot ok"></span> Reachable`;
+                } else {
+                    k8sEl.innerHTML = `<span class="status-dot error"></span> Error`;
+                }
+
+                if (data.longhorn_reachable) {
+                    longhornEl.innerHTML = `<span class="status-dot ok"></span> Connected`;
+                } else {
+                    longhornEl.innerHTML = `<span class="status-dot error"></span> Unreachable`;
+                }
+            } catch (e) {
+                console.error("Health check failed:", e);
+            }
+        }
+
+        // Fetch User Directory
+        async function fetchUsers() {
+            try {
+                const res = await fetch("/api/users");
+                if (!res.ok) throw new Error("Failed to fetch users");
+                const users = await res.json();
+                
+                document.getElementById("active-user-count").innerText = users.length;
+                
+                const tbody = document.getElementById("directory-body");
+                if (users.length === 0) {
+                    tbody.innerHTML = `
+                        <tr>
+                            <td colspan="5" style="text-align: center; color: var(--text-muted); padding: 30px;">
+                                No provisioned users found.
+                            </td>
+                        </tr>
+                    `;
+                    return;
+                }
+                
+                tbody.innerHTML = users.map(u => {
+                    let badgeClass = "pending";
+                    let statusLabel = u.profile_status;
+                    
+                    if (u.profile_status === "READY") {
+                        badgeClass = "ready";
+                        statusLabel = "Active";
+                    } else if (u.profile_status.includes("FAILED") || u.profile_status.includes("TIMEOUT") || u.profile_status.includes("ERROR")) {
+                        badgeClass = "error";
+                        statusLabel = "Error";
+                    }
+
+                    const quotaBadge = u.quota_group_name
+                        ? `<span style="font-size:0.75rem;color:var(--accent);">${u.quota_group_name}</span>`
+                        : `<span style="font-size:0.75rem;color:var(--text-muted);">Unlimited</span>`;
+                    
+                    return `
+                        <tr>
+                            <td>
+                                <div class="user-meta">
+                                    <span class="name">${u.name}</span>
+                                    <span class="username">@${u.username}</span>
+                                </div>
+                            </td>
+                            <td>${u.email}</td>
+                            <td>
+                                <div class="pw-cell">
+                                    <span class="pw-text pw-hidden" id="pw-${u.gitlab_id}">••••••••••••</span>
+                                    <button class="eye-btn" onclick="togglePassword('${u.password}', this, document.getElementById('pw-${u.gitlab_id}'))" title="Show/Hide Password">
+                                        <i data-lucide="eye" style="width: 14px; height: 14px;"></i>
+                                    </button>
+                                    <button class="copy-btn" onclick="copyPassword('${u.password}', this)" title="Copy Password">
+                                        <i data-lucide="copy" style="width: 14px; height: 14px;"></i>
+                                    </button>
+                                </div>
+                            </td>
+                            <td>
+                                <div style="display:flex;align-items:center;gap:6px;">
+                                    ${quotaBadge}
+                                    <button class="icon-btn" title="Change quota group"
+                                        onclick="openReassignModal('${u.username}', '${u.name}', ${u.quota_group_id || 'null'})"
+                                        style="padding:3px;">
+                                        <i data-lucide="pencil" style="width:13px;height:13px;"></i>
+                                    </button>
+                                </div>
+                            </td>
+                            <td>
+                                <span class="badge ${badgeClass}">${statusLabel}</span>
+                            </td>
+                            <td style="text-align: right;">
+                                <button class="delete-btn" onclick="openDeleteModal(${u.gitlab_id}, '${u.username}', '${u.name}')" title="Decommission User">
+                                    <i data-lucide="trash-2" style="width: 18px; height: 18px;"></i>
+                                </button>
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
+                
+                lucide.createIcons();
+            } catch (e) {
+                showToast("Failed to load user directory.", true);
+            }
+        }
+
+        // Provision User
+        async function provisionUser() {
+            const name = document.getElementById("fullname").value.trim();
+            const username = document.getElementById("username").value.trim();
+            const email = document.getElementById("email").value.trim();
+            const password = document.getElementById("password").value;
+            const submitBtn = document.getElementById("submit-btn");
+            
+            if (!name || !username || !email || !password) {
+                showToast("All fields are required.", true);
+                return;
+            }
+
+            if (password.length < 8) {
+                showToast("Password must be at least 8 characters.", true);
+                return;
+            }
+
+            submitBtn.disabled = true;
+            const originalHTML = submitBtn.innerHTML;
+            submitBtn.innerHTML = `<i data-lucide="loader" class="spin"></i> Provisioning...`;
+            lucide.createIcons();
+
+            try {
+                const res = await fetch("/api/users", {
+                    method: "POST",
+                    headers: { 
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({ name, username, email, password,
+                        quota_group_id: document.getElementById('quota-group-select').value
+                            ? parseInt(document.getElementById('quota-group-select').value) : null
+                    })
+                });
+
+                const data = await res.json();
+                if (res.ok) {
+                    showToast(`User @${data.username} successfully provisioned!`);
+                    
+                    // Clear inputs
+                    document.getElementById("fullname").value = "";
+                    document.getElementById("username").value = "";
+                    document.getElementById("email").value = "";
+                    document.getElementById("password").value = "";
+                    document.getElementById("quota-group-select").value = "";
+                    
+                    fetchUsers();
+                } else {
+                    // Display the actual GitLab error message
+                    showToast(data.detail || "Failed to provision user.", true);
+                }
+            } catch (e) {
+                showToast("Server connection error.", true);
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = originalHTML;
+                lucide.createIcons();
+            }
+        }
+
+        // Initial setup (called after login)
+        async function init() {
+            lucide.createIcons();
+            await fetchHealth();
+            await fetchUsers();
+            await fetchQuotaGroupsForSelect();
+            
+            // Poll health every 15s and users every 10s
+            setInterval(fetchHealth, 15000);
+            setInterval(fetchUsers, 10000);
+        }
+
+        // ============================================================
+        // Quota Group Select (provision form)
+        // ============================================================
+        async function fetchQuotaGroupsForSelect() {
+            try {
+                const res = await fetch('/api/quota-groups');
+                if (!res.ok) return;
+                const groups = await res.json();
+                const sel = document.getElementById('quota-group-select');
+                sel.innerHTML = '<option value="">Unlimited (No Resource Limits)</option>' +
+                    groups.map(g => `<option value="${g.id}">${g.name}</option>`).join('');
+            } catch(e) {}
+        }
+
+        // ============================================================
+        // Quota Groups Page
+        // ============================================================
+        let allQuotaGroups = [];
+
+        async function fetchQuotaGroups() {
+            try {
+                const res = await fetch('/api/quota-groups');
+                if (!res.ok) throw new Error();
+                allQuotaGroups = await res.json();
+                renderQuotaCards(allQuotaGroups);
+            } catch(e) {
+                document.getElementById('quota-list').innerHTML =
+                    '<p style="color:var(--error)">Failed to load quota groups.</p>';
+            }
+        }
+
+        function renderQuotaCards(groups) {
+            const el = document.getElementById('quota-list');
+            if (!groups.length) {
+                el.innerHTML = `<div style="color:var(--text-muted);padding:20px;">
+                    No quota groups yet. Click <strong>New Quota Group</strong> to create one.
+                </div>`;
+                return;
+            }
+            el.innerHTML = groups.map(g => `
+                <div class="quota-card">
+                    <div class="quota-card-header">
+                        <div>
+                            <div class="quota-card-name">${g.name}</div>
+                            <div class="quota-card-desc">${g.description || '—'}</div>
+                        </div>
+                        <div class="quota-card-actions">
+                            <button class="icon-btn" title="Edit" onclick="openQuotaModal(${JSON.stringify(g).replace(/"/g,'&quot;')})">
+                                <i data-lucide="pencil" style="width:16px;height:16px;"></i>
+                            </button>
+                            <button class="icon-btn" title="Duplicate" onclick="duplicateGroup(${g.id})">
+                                <i data-lucide="copy" style="width:16px;height:16px;"></i>
+                            </button>
+                            <button class="icon-btn danger" title="Delete" onclick="deleteGroup(${g.id}, '${g.name}', ${g.user_count})">
+                                <i data-lucide="trash-2" style="width:16px;height:16px;"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="quota-limits">
+                        <div class="limit-item">
+                            <div class="limit-label">CPU</div>
+                            <div class="limit-value">${g.cpu_limit} cores</div>
+                        </div>
+                        <div class="limit-item">
+                            <div class="limit-label">GPU</div>
+                            <div class="limit-value">${g.gpu_limit}</div>
+                        </div>
+                        <div class="limit-item">
+                            <div class="limit-label">Memory</div>
+                            <div class="limit-value">${g.memory_limit}</div>
+                        </div>
+                        <div class="limit-item">
+                            <div class="limit-label">Storage</div>
+                            <div class="limit-value">${g.storage_limit}</div>
+                        </div>
+                    </div>
+                    <div class="quota-footer">
+                        <i data-lucide="users" style="width:13px;height:13px;"></i>
+                        ${g.user_count} assigned user${g.user_count !== 1 ? 's' : ''}
+                    </div>
+                </div>
+            `).join('');
+            lucide.createIcons();
+        }
+
+        // ============================================================
+        // Quota Group Modal
+        // ============================================================
+        function openQuotaModal(group = null) {
+            document.getElementById('quota-modal-id').value   = group ? group.id : '';
+            document.getElementById('quota-modal-title').textContent = group ? 'Edit Quota Group' : 'New Quota Group';
+            document.getElementById('qm-name').value    = group ? group.name : '';
+            document.getElementById('qm-desc').value    = group ? (group.description || '') : '';
+            document.getElementById('qm-cpu').value     = group ? group.cpu_limit : '';
+            document.getElementById('qm-gpu').value     = group ? group.gpu_limit : '0';
+            document.getElementById('qm-memory').value  = group ? group.memory_limit : '';
+            document.getElementById('qm-storage').value = group ? group.storage_limit : '';
+            document.getElementById('quota-modal').classList.add('show');
+            lucide.createIcons();
+        }
+
+        function closeQuotaModal() {
+            document.getElementById('quota-modal').classList.remove('show');
+        }
+
+        async function saveQuotaGroup() {
+            const id      = document.getElementById('quota-modal-id').value;
+            const payload = {
+                name:          document.getElementById('qm-name').value.trim(),
+                description:   document.getElementById('qm-desc').value.trim(),
+                cpu_limit:     parseFloat(document.getElementById('qm-cpu').value),
+                gpu_limit:     parseInt(document.getElementById('qm-gpu').value) || 0,
+                memory_limit:  document.getElementById('qm-memory').value.trim(),
+                storage_limit: document.getElementById('qm-storage').value.trim(),
+            };
+
+            if (!payload.name || !payload.cpu_limit || !payload.memory_limit || !payload.storage_limit) {
+                showToast('Name, CPU, Memory, and Storage are required.', true);
+                return;
+            }
+            // Normalise: accept 16GI, 16gi, 16Gi → store as 16Gi
+            payload.memory_limit  = payload.memory_limit.replace(/gi$/i, 'Gi');
+            payload.storage_limit = payload.storage_limit.replace(/gi$/i, 'Gi');
+
+            if (!/^\d+(\.\d+)?Gi$/.test(payload.memory_limit)) {
+                showToast('Memory must be in Gi format, e.g. 16Gi', true); return;
+            }
+            if (!/^\d+(\.\d+)?Gi$/.test(payload.storage_limit)) {
+                showToast('Storage must be in Gi format, e.g. 50Gi', true); return;
+            }
+
+            const btn = document.getElementById('qm-save-btn');
+            btn.disabled = true;
+
+            try {
+                const method = id ? 'PUT' : 'POST';
+                const url    = id ? `/api/quota-groups/${id}` : '/api/quota-groups';
+                const res    = await fetch(url, {
+                    method,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    showToast(id ? 'Quota group updated.' : 'Quota group created.');
+                    closeQuotaModal();
+                    fetchQuotaGroups();
+                    fetchQuotaGroupsForSelect();
+                } else {
+                    showToast(data.detail || 'Failed to save quota group.', true);
+                }
+            } catch(e) {
+                showToast('Server error.', true);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        async function duplicateGroup(id) {
+            try {
+                const res = await fetch(`/api/quota-groups/${id}/duplicate`, { method: 'POST' });
+                const data = await res.json();
+                if (res.ok) {
+                    showToast(`Duplicated as "${data.name}".`);
+                    fetchQuotaGroups();
+                    fetchQuotaGroupsForSelect();
+                } else {
+                    showToast(data.detail || 'Failed to duplicate.', true);
+                }
+            } catch(e) { showToast('Server error.', true); }
+        }
+
+        async function deleteGroup(id, name, userCount) {
+            const msg = userCount > 0
+                ? `Delete "${name}"? ${userCount} user(s) will revert to Unlimited.`
+                : `Delete quota group "${name}"?`;
+            if (!confirm(msg)) return;
+            try {
+                const res = await fetch(`/api/quota-groups/${id}`, { method: 'DELETE' });
+                const data = await res.json();
+                if (res.ok) {
+                    showToast(data.message || 'Group deleted.');
+                    fetchQuotaGroups();
+                    fetchQuotaGroupsForSelect();
+                } else {
+                    showToast(data.detail || 'Failed to delete.', true);
+                }
+            } catch(e) { showToast('Server error.', true); }
+        }
+
+        async function manualSync() {
+            showToast('Synchronising Kubernetes ResourceQuotas…');
+            try {
+                const res  = await fetch('/api/quota-groups/sync', { method: 'POST' });
+                const data = await res.json();
+                if (res.ok) {
+                    const r = data.report;
+                    showToast(`Sync done — created: ${r.created.length}, updated: ${r.updated.length}, deleted: ${r.deleted.length}, errors: ${r.errors.length}`);
+                } else {
+                    showToast(data.detail || 'Sync failed.', true);
+                }
+            } catch(e) { showToast('Server error during sync.', true); }
+        }
+
+        // ============================================================
+        // Quota Reassign Modal
+        // ============================================================
+        function openReassignModal(username, displayName, currentGroupId) {
+            document.getElementById('reassign-username').value = username;
+            document.getElementById('reassign-display-name').textContent = `${displayName} (@${username})`;
+
+            // Populate select with current groups
+            const sel = document.getElementById('reassign-group-select');
+            sel.innerHTML = '<option value="">Unlimited (No Resource Limits)</option>' +
+                allQuotaGroups.map(g =>
+                    `<option value="${g.id}" ${g.id === currentGroupId ? 'selected' : ''}>${g.name}</option>`
+                ).join('');
+
+            document.getElementById('reassign-modal').classList.add('show');
+            lucide.createIcons();
+        }
+
+        function closeReassignModal() {
+            document.getElementById('reassign-modal').classList.remove('show');
+        }
+
+        async function saveReassign() {
+            const username = document.getElementById('reassign-username').value;
+            const groupId  = document.getElementById('reassign-group-select').value;
+            const btn      = document.getElementById('reassign-save-btn');
+            btn.disabled   = true;
+
+            try {
+                const res = await fetch(`/api/users/${username}/quota-group`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ quota_group_id: groupId ? parseInt(groupId) : null }),
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    const label = groupId
+                        ? allQuotaGroups.find(g => g.id === parseInt(groupId))?.name || 'group'
+                        : 'Unlimited';
+                    showToast(`@${username} moved to ${label}. K8s quota syncing…`);
+                    closeReassignModal();
+                    fetchUsers();
+                } else {
+                    showToast(data.detail || 'Failed to update quota group.', true);
+                }
+            } catch(e) {
+                showToast('Server error.', true);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        // On page load, initialize everything
+        window.onload = () => {
+            init();
+        };
+    </script>
+</body>
+</html>

@@ -1,0 +1,89 @@
+---
+# ==============================================================================
+# GITLAB CONTAINER REGISTRY — Enable on HTTP (internal deployment)
+# ==============================================================================
+# GitLab's built-in container registry is enabled here on port 5050 over plain
+# HTTP. HTTPS is skipped because this is a private LAN deployment with no
+# public DNS name. Docker / containerd must be configured to treat the registry
+# IP:port as an insecure registry (see notes at the bottom).
+#
+# After this play runs, users push images with:
+#   docker login http://{{ ansible_host }}:5050
+#   docker push {{ ansible_host }}:5050/<namespace>/<project>/<image>:<tag>
+#
+# Usage (re-run only the registry tasks):
+#   ansible-playbook playbook.yml --tags registry
+
+# ---- Enable the registry in gitlab.rb ----------------------------------------
+# We inject a dedicated block so changes are idempotent and easy to remove.
+# Key settings:
+#   registry_external_url  — the URL GitLab advertises to clients. Using 'http://'
+#                            tells GitLab to skip TLS entirely (no Let's Encrypt,
+#                            no self-signed cert generation).
+#   registry['enable']     — explicitly enable the registry service.
+#   registry['dir']        — filesystem path where image layers are stored.
+#                            Defaults to /var/opt/gitlab/gitlab-rails/shared/registry
+#                            but we set it explicitly for clarity.
+- name: Configure GitLab Container Registry in gitlab.rb
+  tags: [registry]
+  ansible.builtin.blockinfile:
+    path: /etc/gitlab/gitlab.rb
+    marker: "# {mark} ANSIBLE MANAGED: Container Registry"
+    block: |
+      # ---- Container Registry (HTTP, internal) ----
+      registry_external_url 'http://{{ ansible_host }}:5050'
+      registry['enable'] = true
+      registry['dir'] = '/var/opt/gitlab/gitlab-rails/shared/registry'
+
+      # Disable TLS termination inside GitLab's built-in Nginx for the registry.
+      # Required when registry_external_url uses http:// instead of https://.
+      registry_nginx['enable']  = true
+      registry_nginx['ssl']     = false
+      registry_nginx['listen_port'] = 5050
+    state: present
+  register: registry_config_changed
+
+# ---- Open port 5050 in UFW (if active) --------------------------------------
+# UFW may block incoming connections on port 5050. Allow TCP so Docker clients
+# on the K8s nodes can pull/push images. The task is skipped silently if UFW
+# is not installed or not active.
+- name: Allow port 5050 through UFW (if UFW is active)
+  tags: [registry]
+  ansible.builtin.command: ufw allow 5050/tcp
+  register: ufw_result
+  changed_when: "'Rules updated' in ufw_result.stdout"
+  failed_when: false   # UFW may not be installed — that is fine
+
+# ---- Reconfigure GitLab to apply registry settings --------------------------
+- name: Reconfigure GitLab to enable container registry
+  tags: [registry]
+  ansible.builtin.command: gitlab-ctl reconfigure
+  when: registry_config_changed.changed
+  async: 600
+  poll: 15
+
+# ---- Wait for the registry port to become available -------------------------
+- name: Wait for GitLab registry to listen on port 5050
+  tags: [registry]
+  ansible.builtin.wait_for:
+    host: "{{ ansible_host }}"
+    port: 5050
+    timeout: 120
+    delay: 10
+
+# ---- Verify registry is healthy ---------------------------------------------
+- name: Check GitLab registry health endpoint
+  tags: [registry]
+  ansible.builtin.uri:
+    url: "http://{{ ansible_host }}:5050/v2/"
+    status_code: [200, 401]   # 401 = "Unauthorized" is expected (auth required)
+  register: registry_health
+  retries: 5
+  delay: 10
+  until: registry_health.status in [200, 401]
+
+- name: Show registry status
+  tags: [registry]
+  ansible.builtin.debug:
+    msg: "Container registry is up at http://{{ ansible_host }}:5050 (HTTP status: {{ registry_health.status }})"
+

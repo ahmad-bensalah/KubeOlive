@@ -1,0 +1,149 @@
+---
+# ============================================================
+# MASTER ROLE — runs on the control plane node only
+# ============================================================
+
+- name: Wait for MicroK8s to be fully ready
+  ansible.builtin.command: microk8s status --wait-ready
+  changed_when: false
+
+# ---- kubectl wrapper ---------------------------------------
+- name: Remove existing kubectl symlink or file
+  ansible.builtin.file:
+    path: /usr/local/bin/kubectl
+    state: absent
+
+- name: Create kubectl wrapper script
+  ansible.builtin.copy:
+    dest: /usr/local/bin/kubectl
+    mode: "0755"
+    content: |
+      #!/bin/sh
+      exec /snap/bin/microk8s.kubectl "$@"
+
+
+# ---- enable addons -----------------------------------------
+- name: Enable DNS addon
+  ansible.builtin.command: microk8s enable dns
+  args:
+    creates: /var/snap/microk8s/common/var/lib/k8s-dqlite/addons-active/dns
+  register: dns_enable
+  changed_when: dns_enable.rc == 0
+
+- name: Enable MetalLB addon with IP range
+  ansible.builtin.command: microk8s enable metallb:{{ metallb_ip_range }}
+  args:
+    creates: /var/snap/microk8s/common/var/lib/k8s-dqlite/addons-active/metallb
+  register: metallb_enable
+  changed_when: metallb_enable.rc == 0
+
+# ---- configure Calico for VXLAN --------------------------
+# MicroK8s 1.31 ships Calico defaulting to VXLAN backend.
+# We explicitly enforce VXLAN (UDP 4789) which works reliably
+# across all network topologies including Proxmox VMs on different
+# subnets. IP-in-IP (protocol 4) with BIRD/BGP is unreliable on
+# networks that filter non-standard IP protocols.
+- name: Patch Calico ConfigMap to use VXLAN backend
+  ansible.builtin.command: >
+    kubectl patch configmap calico-config -n kube-system
+    --type merge -p '{"data":{"calico_backend":"vxlan"}}'
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: false
+
+- name: Patch Calico IPPool for VXLAN Always
+  ansible.builtin.command: >
+    kubectl patch ippool default-ipv4-ippool --type merge
+    -p '{"spec":{"vxlanMode":"Always","ipipMode":"Never"}}'
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: false
+
+- name: Set Calico DaemonSet env variables for VXLAN
+  ansible.builtin.command: >
+    kubectl set env daemonset/calico-node -n kube-system
+    CALICO_IPV4POOL_VXLAN=Always CALICO_IPV4POOL_IPIP=Never
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: false
+
+- name: Restart Calico DaemonSet to apply changes
+  ansible.builtin.command: kubectl rollout restart daemonset calico-node -n kube-system
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: false
+
+- name: Wait for Calico DaemonSet to be ready after restart
+  ansible.builtin.command: >
+    kubectl rollout status daemonset/calico-node -n kube-system --timeout=3m
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: false
+
+
+# ---- kubeconfig generation ----------------------------------
+- name: Ensure local configs/ directory exists on Ansible controller
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/configs"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+
+- name: Retrieve MicroK8s kubeconfig
+  ansible.builtin.command: microk8s config
+  register: kubeconfig_content
+  changed_when: false
+
+- name: Write kubeconfig to local configs/config
+  ansible.builtin.copy:
+    content: "{{ kubeconfig_content.stdout }}\n"
+    dest: "{{ playbook_dir }}/configs/config"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+
+- name: Ensure root .kube directory exists
+  ansible.builtin.file:
+    path: /root/.kube
+    state: directory
+    mode: "0700"
+
+- name: Copy kubeconfig to root kubeconfig
+  ansible.builtin.copy:
+    content: "{{ kubeconfig_content.stdout }}\n"
+    dest: /root/.kube/config
+    mode: "0600"
+
+- name: Ensure {{ vm_user }} user .kube directory exists
+  ansible.builtin.file:
+    path: /home/{{ vm_user }}/.kube
+    state: directory
+    owner: "{{ vm_user }}"
+    group: "{{ vm_user }}"
+    mode: "0755"
+
+- name: Copy kubeconfig to {{ vm_user }} user
+  ansible.builtin.copy:
+    content: "{{ kubeconfig_content.stdout }}\n"
+    dest: /home/{{ vm_user }}/.kube/config
+    owner: "{{ vm_user }}"
+    group: "{{ vm_user }}"
+    mode: "0644"
+
+# ---- install Helm -------------------------------------------
+- name: Install Helm
+  ansible.builtin.shell: |
+    curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  args:
+    creates: /usr/local/bin/helm
+
+# ---- label master node --------------------------------------
+- name: Label master node as control-plane and master
+  ansible.builtin.shell: kubectl label node $(hostname) node-role.kubernetes.io/control-plane="" node-role.kubernetes.io/master="" --overwrite
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: false
+  tags: [label_nodes]
+
+

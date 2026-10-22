@@ -1,0 +1,11 @@
+---
+- name: Rotate Admin Portal GitLab API token
+  hosts: gitlab_machine
+  become: true
+  gather_facts: false
+  tags:
+    - rotate_token
+
+  tasks:
+    - name: Include token rotation tasks
+      ansible.builtin.include_tasks: roles/gitlab/tasks/rotate_token.yml

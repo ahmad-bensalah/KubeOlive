@@ -1,0 +1,279 @@
+---
+# ==============================================================================
+# ADMIN PORTAL — Deploy the Kubeflow Multi-User Admin Portal on the GitLab VM
+# ==============================================================================
+# The Admin Portal is a lightweight FastAPI web application that provides a UI
+# for platform administrators to:
+#   1. Create new Kubeflow user namespaces (Kubernetes Profile resources)
+#   2. Create corresponding GitLab accounts for each user
+#   3. Automatically replicate the 'mlpipeline-minio-artifact' Kubernetes Secret
+#      from the 'kubeflow' namespace into the new user namespace — this is what
+#      allows KFP pipelines to authenticate with MinIO without manual credential
+#      management by the AI engineer.
+#
+# We deploy the portal on the GitLab VM because it needs direct access to both
+# the GitLab Rails API (for creating users) and the Kubernetes API (for creating
+# namespaces and secrets). The GitLab VM already has network connectivity to both.
+
+# ---- Install kubectl on the GitLab VM ----------------------------------------
+# The Admin Portal's Python backend uses subprocess calls to kubectl to interact
+# with the Kubernetes cluster (create namespaces, copy secrets). We install a
+# specific version (v1.31.0) to match the MicroK8s API server version.
+- name: Install kubectl on GitLab VM
+  tags: [portal]
+  ansible.builtin.get_url:
+    url: https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl
+    dest: /usr/local/bin/kubectl
+    mode: '0755'
+
+# ---- Create application directories -----------------------------------------
+# /home/ubuntu/admin-portal/  — holds the Flask/FastAPI application code
+# /var/lib/portal-data/       — persistent data storage for the portal database
+- name: Ensure app and data directories exist
+  tags: [portal]
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ vm_user }}"
+    group: "{{ vm_user }}"
+    mode: '0755'
+  loop:
+    - /home/{{ vm_user }}/admin-portal
+    - /var/lib/portal-data
+
+# ---- Configure kubeconfig for kubectl access ---------------------------------
+# The portal needs kubeconfig files for both the 'ubuntu' user (for manual
+# debugging) and 'root' (because the systemd service runs as root to bind
+# to privileged ports and access all Kubernetes resources).
+#
+# IMPORTANT: The kubeconfig copied from configs/ has 'server: https://127.0.0.1:16443'
+# which only works on the control plane node itself. Since the GitLab VM is a
+# DIFFERENT machine, we must replace 127.0.0.1 with the actual control plane IP
+# (10.110.188.144) so kubectl can reach the K8s API server over the network.
+- name: Ensure {{ vm_user }} user .kube directory exists
+  tags: [portal]
+  ansible.builtin.file:
+    path: /home/{{ vm_user }}/.kube
+    state: directory
+    owner: "{{ vm_user }}"
+    group: "{{ vm_user }}"
+    mode: '0755'
+
+- name: Copy kubeconfig to {{ vm_user }} user
+  tags: [portal]
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/configs/config"
+    dest: /home/{{ vm_user }}/.kube/config
+    owner: "{{ vm_user }}"
+    group: "{{ vm_user }}"
+    mode: '0600'
+
+# Replace the loopback address with the actual control plane IP.
+# Without this, kubectl would try to connect to 127.0.0.1:16443 on the GitLab
+# VM itself, which has no Kubernetes API server running — it would fail with
+# "connection refused".
+- name: Update server IP in {{ vm_user }} kubeconfig to point to control plane
+  tags: [portal]
+  ansible.builtin.replace:
+    path: /home/{{ vm_user }}/.kube/config
+    regexp: '127\.0\.0\.1'
+    replace: '{{ controlplane.ip }}'
+
+- name: Ensure root .kube directory exists
+  tags: [portal]
+  ansible.builtin.file:
+    path: /root/.kube
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Copy kubeconfig to root
+  tags: [portal]
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/configs/config"
+    dest: /root/.kube/config
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Update server IP in root kubeconfig to point to control plane
+  tags: [portal]
+  ansible.builtin.replace:
+    path: /root/.kube/config
+    regexp: '127\.0\.0\.1'
+    replace: '{{ controlplane.ip }}'
+
+# ---- Generate GitLab API Token -----------------------------------------------
+# The Admin Portal needs a GitLab Personal Access Token (PAT) with 'api' scope
+# to programmatically create GitLab users when new Kubeflow profiles are provisioned.
+# We use gitlab-rails runner to create the token directly in the database,
+# bypassing the UI. The token is valid for 365 days.
+#
+# Idempotency: if the token already exists and is valid, we don't recreate it.
+# If it's expired or revoked, we destroy it and create a fresh one.
+- name: Generate GitLab API token for Admin Portal
+  tags: [portal]
+  ansible.builtin.shell: |
+    gitlab-rails runner "
+      token_name = 'kubeflow-admin-portal-token'
+      user = User.find_by_username('root')
+      token = user.personal_access_tokens.find_by(name: token_name)
+      if token.nil? || token.revoked? || (token.expires_at && token.expires_at < Date.today)
+        user.personal_access_tokens.where(name: token_name).destroy_all
+        token = user.personal_access_tokens.create!(
+          name: token_name,
+          scopes: ['api'],
+          expires_at: 365.days.from_now
+        )
+        File.write('/tmp/gitlab_portal_token.txt', token.token)
+      else
+        unless File.exist?('/tmp/gitlab_portal_token.txt')
+          user.personal_access_tokens.where(name: token_name).destroy_all
+          token = user.personal_access_tokens.create!(
+            name: token_name,
+            scopes: ['api'],
+            expires_at: 365.days.from_now
+          )
+          File.write('/tmp/gitlab_portal_token.txt', token.token)
+        end
+      end
+    "
+  register: token_generation
+  changed_when: token_generation.rc == 0
+
+# Read the generated token from the file on the GitLab VM.
+# We use 'slurp' (base64-encoded read) instead of 'command: cat' because
+# slurp is idempotent and doesn't trigger "changed" in Ansible.
+- name: Read GitLab API token
+  tags: [portal]
+  ansible.builtin.slurp:
+    src: /tmp/gitlab_portal_token.txt
+  register: token_slurp
+
+- name: Set GitLab API token fact
+  tags: [portal]
+  ansible.builtin.set_fact:
+    gitlab_portal_token: "{{ token_slurp.content | b64decode | trim }}"
+
+# ---- Deploy Application Files -----------------------------------------------
+# Copy the portal's Python package (app/), HTML frontend (index.html), and
+# pip requirements file to the application directory on the GitLab VM.
+#
+# The backend is now a package under app/ with the following layout:
+#   app/__init__.py
+#   app/main.py          — FastAPI app assembly & entry point
+#   app/config.py        — environment variables and constants
+#   app/database.py      — SQLite init and helpers
+#   app/gitlab_client.py — GitLab REST API wrapper
+#   app/kubernetes.py    — kubectl / Profile / MinIO / Elyra logic
+#   app/routes/
+#     __init__.py
+#     users.py           — /api/users endpoints
+#     health.py          — /api/health endpoint
+- name: Copy Admin Portal Python package (app/)
+  tags: [portal]
+  ansible.builtin.copy:
+    src: app/
+    dest: /home/{{ vm_user }}/admin-portal/app/
+    owner: "{{ vm_user }}"
+    group: "{{ vm_user }}"
+    mode: '0644'
+
+- name: Copy Admin Portal static assets
+  tags: [portal]
+  ansible.builtin.copy:
+    src: static/
+    dest: /home/{{ vm_user }}/admin-portal/static/
+    owner: "{{ vm_user }}"
+    group: "{{ vm_user }}"
+    mode: '0644'
+
+- name: Render Admin Portal frontend (index.html) with dynamic IPs
+  tags: [portal]
+  ansible.builtin.template:
+    src: index.html.j2
+    dest: "/home/{{ vm_user }}/admin-portal/index.html"
+    owner: "{{ vm_user }}"
+    group: "{{ vm_user }}"
+    mode: '0644'
+
+- name: Copy Admin Portal requirements file
+  tags: [portal]
+  ansible.builtin.copy:
+    src: requirements.txt
+    dest: "/home/{{ vm_user }}/admin-portal/requirements.txt"
+    owner: "{{ vm_user }}"
+    group: "{{ vm_user }}"
+    mode: '0644'
+
+# ---- Install Python Dependencies --------------------------------------------
+# We install pip and venv, then create an isolated virtual environment for the
+# portal to avoid polluting the system Python installation.
+- name: Install python3-pip and virtualenv
+  tags: [portal]
+  ansible.builtin.apt:
+    name:
+      - python3-pip
+      - python3-venv
+    state: present
+    update_cache: true
+
+- name: Install Python dependencies
+  tags: [portal]
+  ansible.builtin.pip:
+    requirements: /home/{{ vm_user }}/admin-portal/requirements.txt
+    virtualenv: /home/{{ vm_user }}/admin-portal/venv
+    virtualenv_command: /usr/bin/python3 -m venv
+
+# ---- Create Systemd Service -------------------------------------------------
+# We run the portal as a systemd service so it starts automatically on boot
+# and restarts on crashes. Key configuration:
+#   - User=root: needed for kubectl access to all namespaces
+#   - GITLAB_TOKEN env var: injected so the Python app can call the GitLab API
+#   - KUBECONFIG env var: tells kubectl where to find cluster credentials
+#   - Port 7070: chosen to avoid conflicts with GitLab's port 80
+- name: Install MinIO Client (mc) on GitLab VM
+  tags: [portal]
+  ansible.builtin.get_url:
+    url: https://dl.min.io/client/mc/release/linux-amd64/mc
+    dest: /usr/local/bin/mc
+    mode: '0755'
+
+- name: Create Systemd service unit for Admin Portal
+  tags: [portal]
+  ansible.builtin.copy:
+    dest: /lib/systemd/system/kubeflow-admin-portal.service
+    content: |
+      [Unit]
+      Description=Charmed Kubeflow Multi-User Admin Portal
+      After=network.target gitlab-runsvdir.service
+
+      [Service]
+      Type=simple
+      User=root
+      WorkingDirectory=/home/{{ vm_user }}/admin-portal
+      ExecStart=/home/{{ vm_user }}/admin-portal/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 7070
+      Restart=always
+      Environment=GITLAB_TOKEN={{ gitlab_portal_token }}
+      Environment=KUBECONFIG=/root/.kube/config
+      Environment=GITLAB_REGISTRY_URL=http://{{ gitlab_ip }}:5050
+      Environment=MINIO_NODEPORT_URL=http://{{ controlplane.ip }}:30900
+      [Install]
+      WantedBy=multi-user.target
+    mode: '0644'
+  register: portal_service_file
+
+- name: Reload systemd if service file changed
+  tags: [portal]
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: portal_service_file.changed
+
+- name: Enable and restart Kubeflow Admin Portal service
+  tags: [portal]
+  ansible.builtin.systemd:
+    name: kubeflow-admin-portal
+    enabled: true
+    state: restarted
+

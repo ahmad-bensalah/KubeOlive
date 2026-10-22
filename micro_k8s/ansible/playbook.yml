@@ -1,0 +1,164 @@
+---
+# ==============================================================================
+# MAIN ANSIBLE PLAYBOOK FOR CHARMED KUBEFLOW AND GITLAB INTEGRATION
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# PLAY 1: Common setup across all Kubernetes nodes (Control Plane and Workers)
+# ------------------------------------------------------------------------------
+# Configures prerequisites like kernel modules, sysctl parameters, and snapd 
+# dependencies required for MicroK8s to initialize properly.
+- name: Common setup on all nodes
+  hosts: k8s
+  become: true
+  gather_facts: true
+  tags:
+    - common
+    - kubernetes
+  roles:
+    - common
+
+# ------------------------------------------------------------------------------
+# PLAY 2: Initialize and configure the Kubernetes Control Plane (Master Node)
+# ------------------------------------------------------------------------------
+# Runs exclusively on the master node to initialize the MicroK8s cluster, 
+# enable necessary addons (like DNS, RBAC, etc.), and extract the kubeconfig.
+- name: Control plane setup
+  hosts: master
+  become: true
+  gather_facts: true
+  tags:
+    - master
+    - kubernetes
+  roles:
+    - master
+
+# ------------------------------------------------------------------------------
+# PLAY 3: Join Worker Nodes to the MicroK8s cluster
+# ------------------------------------------------------------------------------
+# Runs on worker nodes. Executes sequentially (serial: 1) to obtain join tokens 
+# from the master and securely attach worker nodes to the cluster one by one.
+- name: Workers join the cluster
+  hosts: worker
+  become: true
+  gather_facts: true
+  serial: 1
+  tags:
+    - worker
+    - kubernetes
+  roles:
+    - worker
+
+# ------------------------------------------------------------------------------
+# PLAY 4: Re-apply Calico IP-in-IP configuration after all workers have joined
+# ------------------------------------------------------------------------------
+# The master role configures Calico before workers join. After workers join,
+# Calico needs to be restarted so it establishes VXLAN tunnels with all nodes
+# and programs the correct routes on every node.
+- name: Reconfigure Calico after all workers joined
+  hosts: master
+  become: true
+  gather_facts: false
+  tags:
+    - calico
+    - networking
+  tasks:
+    - name: Re-patch Calico IPPool for VXLAN
+      ansible.builtin.command: >
+        kubectl patch ippool default-ipv4-ippool --type merge
+        -p '{"spec":{"vxlanMode":"Always","ipipMode":"Never"}}'
+      environment:
+        KUBECONFIG: /root/.kube/config
+      changed_when: false
+
+    - name: Re-set Calico DaemonSet env variables
+      ansible.builtin.command: >
+        kubectl set env daemonset/calico-node -n kube-system
+        CALICO_IPV4POOL_VXLAN=Always CALICO_IPV4POOL_IPIP=Never
+      environment:
+        KUBECONFIG: /root/.kube/config
+      changed_when: false
+
+    - name: Restart Calico DaemonSet on all nodes
+      ansible.builtin.command: kubectl rollout restart daemonset calico-node -n kube-system
+      environment:
+        KUBECONFIG: /root/.kube/config
+      changed_when: false
+
+    - name: Wait for Calico to be fully ready on all nodes
+      ansible.builtin.command: >
+        kubectl rollout status daemonset/calico-node -n kube-system --timeout=5m
+      environment:
+        KUBECONFIG: /root/.kube/config
+      changed_when: false
+
+# ------------------------------------------------------------------------------
+# PLAY 5: Apply MetalLB IPAddressPool and L2Advertisement
+# ------------------------------------------------------------------------------
+# The master role enables the MetalLB addon via 'microk8s enable metallb:<range>',
+# but we also apply the metallb-pool.yaml manifest to explicitly declare the
+# IPAddressPool and L2Advertisement CRs. This ensures MetalLB knows which IP
+- name: Apply MetalLB IP pool manifest
+  hosts: master
+  become: true
+  gather_facts: false
+  tags:
+    - metallb
+    - networking
+  roles:
+    - metallb
+
+# ------------------------------------------------------------------------------
+# PLAY 5: Setup Longhorn Distributed Block Storage
+# ------------------------------------------------------------------------------
+# Installs Longhorn across the cluster nodes. Longhorn provides dynamic, 
+# replicated PV provisioning which is vital for Kubeflow pipelines and metadata storage.
+- name: Longhorn distributed storage
+  hosts: k8s
+  become: true
+  gather_facts: true
+  tags:
+    - longhorn
+    - storage
+  roles:
+    - longhorn
+
+# ------------------------------------------------------------------------------
+# PLAY 6: Install GitLab CE and Register the Kubeflow Dex OAuth Application
+# ------------------------------------------------------------------------------
+# Installs GitLab CE on a dedicated VM. Once installed, it registers an OAuth2 
+# application named 'Kubeflow Dex' inside GitLab using gitlab-rails. This App 
+# allows GitLab to act as the identity provider. The generated client credentials 
+# are written to a temp file and fetched locally to be passed to Juju.
+- name: Provision GitLab Server & register Kubeflow OAuth App
+  hosts: gitlab_machine
+  become: true
+  gather_facts: true
+  tags:
+    - gitlab
+    - auth
+  vars:
+    # Defined in group_vars/all.yml — kubeflow_dashboard_ip
+  roles:
+    - gitlab
+
+# ------------------------------------------------------------------------------
+# PLAY 7: Bootstrap Juju Controller and Deploy Charmed Kubeflow
+# ------------------------------------------------------------------------------
+# Bootstraps the Juju controller on a separate VM inside LXD. Then, registers the 
+# MicroK8s cluster, deploys the Charmed Kubeflow bundle, and configures dex-auth 
+# using the OAuth credentials generated and fetched in the previous play.
+- name: Deploy Juju Controller (LXD) & Charmed Kubeflow
+  hosts: juju_machine
+  become: true
+  gather_facts: true
+  tags:
+    - juju
+    - kubeflow
+  vars:
+    # All values sourced from group_vars/all.yml:
+    #   gitlab_oauth_creds, gitlab_base_url, kubeflow_dashboard_url
+    gitlab_oauth_creds: "{{ lookup('file', playbook_dir + '/configs/gitlab_oauth_creds.json') | from_json }}"
+  roles:
+    - juju
+

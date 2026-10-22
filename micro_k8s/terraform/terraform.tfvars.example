@@ -1,0 +1,21 @@
+# ==============================================================================
+# Proxmox VE & VM Provisioning Configuration (Template)
+# Copy to terraform.tfvars and fill in your environment values.
+# ==============================================================================
+
+proxmox_api_url      = "https://10.200.11.114:8006/api2/json"
+proxmox_api_token    = "root@pam!token_name=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+proxmox_ssh_password = "your-proxmox-ssh-password"
+proxmox_node         = "r7525g"
+template_id          = 9000
+
+worker_count         = 2
+vm_user              = "ubuntu"
+vm_password          = "change-me-secure-password"
+
+network_gateway      = "10.200.11.1"
+dns_server           = "8.8.8.8"
+
+ssh_public_keys      = <<-KEYS
+  ssh-ed25519 AAAAC3NzaC1lZDI1NTE5... your-key@workstation
+KEYS

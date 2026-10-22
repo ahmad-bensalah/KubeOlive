@@ -1,0 +1,52 @@
+# ==============================================================================
+# .gitignore — Never commit secrets, provider binaries, or generated state
+# ==============================================================================
+
+# ── Terraform & Infrastructure ────────────────────────────────────────────────
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
+**/.terraform.lock.hcl
+**/*.tfvars
+!**/*.tfvars.example
+
+# ── Archives & Compressed Data ────────────────────────────────────────────────
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+
+# ── Ansible & Automation ──────────────────────────────────────────────────────
+*.retry
+ansible/.vault_pass
+ansible/**/vault_password*
+**/*.code-workspace
+
+# ── Keys & Credentials ────────────────────────────────────────────────────────
+*.pem
+*.key
+*.pub
+id_rsa*
+id_ed25519*
+*_creds.json
+!micro_k8s/ansible/configs/gitlab_oauth_creds.json.example
+
+# ── Python & Environments ─────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv/
+
+# ── IDEs & Operating Systems ──────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

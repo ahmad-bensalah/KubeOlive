@@ -1,0 +1,112 @@
+---
+# ============================================================
+# WORKER ROLE — runs on each worker node
+# ============================================================
+
+# ---- align hostname with inventory_hostname -----------------
+- name: Set system hostname to match inventory name
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+
+- name: Ensure /etc/hostname is correct
+  ansible.builtin.copy:
+    dest: /etc/hostname
+    content: "{{ inventory_hostname }}\n"
+    mode: "0644"
+
+- name: Update 127.0.1.1 entry in /etc/hosts to new hostname
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s+'
+    line: "127.0.1.1 {{ inventory_hostname }}"
+    state: present
+
+# ---- kubectl wrapper ---------------------------------------
+- name: Remove existing kubectl symlink or file
+  ansible.builtin.file:
+    path: /usr/local/bin/kubectl
+    state: absent
+
+- name: Create kubectl wrapper script
+  ansible.builtin.copy:
+    dest: /usr/local/bin/kubectl
+    mode: "0755"
+    content: |
+      #!/bin/sh
+      exec /snap/bin/microk8s.kubectl "$@"
+
+
+# ---- check if already joined -------------------------------
+- name: Get list of nodes in the cluster from master
+  ansible.builtin.command: kubectl get nodes -o jsonpath='{.items[*].metadata.name}'
+  register: nodes_list
+  changed_when: false
+  delegate_to: "{{ groups['master'][0] }}"
+  ignore_errors: true
+
+- name: Determine if node is already joined
+  ansible.builtin.set_fact:
+    is_joined: "{{ inventory_hostname in nodes_list.stdout.split() }}"
+  when: nodes_list.stdout is defined and nodes_list.stdout | length > 0
+  ignore_errors: true
+
+- name: Fallback join check if query failed
+  ansible.builtin.set_fact:
+    is_joined: false
+  when: is_joined is not defined
+
+
+# ---- join the cluster --------------------------------------
+- name: Generate join command on control plane
+  ansible.builtin.shell: microk8s add-node --token-ttl 600 | grep -m1 "microk8s join"
+  register: join_command_output
+  delegate_to: "{{ groups['master'][0] }}"
+  when: not is_joined
+
+- name: Join the worker node to the cluster
+  ansible.builtin.command: "{{ join_command_output.stdout }} --worker"
+  when: not is_joined
+  register: join_result
+  retries: 3
+  delay: 10
+  until: join_result is success
+
+- name: Label worker node as worker
+  ansible.builtin.command: kubectl label node {{ inventory_hostname }} node-role.kubernetes.io/worker="" --overwrite
+  environment:
+    KUBECONFIG: /root/.kube/config
+  delegate_to: "{{ groups['master'][0] }}"
+  changed_when: false
+  tags: [label_nodes]
+
+
+
+# ---- kubeconfig for {{ vm_user }} user ----------------------------
+- name: Ensure {{ vm_user }} .kube directory exists
+  ansible.builtin.file:
+    path: /home/{{ vm_user }}/.kube
+    state: directory
+    owner: "{{ vm_user }}"
+    group: "{{ vm_user }}"
+    mode: "0755"
+
+- name: Copy kubeconfig to {{ vm_user }} user
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/configs/config"
+    dest: /home/{{ vm_user }}/.kube/config
+    owner: "{{ vm_user }}"
+    group: "{{ vm_user }}"
+    mode: "0644"
+
+# ---- kubeconfig for root user ------------------------------
+- name: Ensure root .kube directory exists
+  ansible.builtin.file:
+    path: /root/.kube
+    state: directory
+    mode: "0700"
+
+- name: Copy kubeconfig to root user
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/configs/config"
+    dest: /root/.kube/config
+    mode: "0600"
